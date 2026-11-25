@@ -9,3 +9,6 @@ third_party/OVR/Include/
 
 # the launcher's art is not part of the public source (the launcher builds with a plain look without it)
 launcher_art/
+
+# per-machine CMake settings (game folder, SDK paths)
+CMakeUserPresets.json

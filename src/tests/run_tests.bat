@@ -33,7 +33,7 @@ if errorlevel 1 (
 )
 
 if not exist "%OUT%" mkdir "%OUT%"
-set "INC=/I "%ROOT%" /I "%ROOT%\ovr2xr" /I "%ROOT%\bootstrap" /I "%ROOT%\setup" /I "%ROOT%\common" /I "%TESTS%." /I "%ROOT%\third_party\puff""
+set "INC=/I "%ROOT%" /I "%ROOT%\ovr2xr" /I "%ROOT%\bootstrap" /I "%ROOT%\setup" /I "%ROOT%\launcher" /I "%ROOT%\common" /I "%TESTS%." /I "%ROOT%\third_party\puff""
 set /a NPASS=0, NFAIL=0, NBUILD=0, NSKIP=0
 echo run_tests: output in %OUT%
 
@@ -42,10 +42,12 @@ for %%F in ("%TESTS%*_test.cpp") do (
   set "ARG="
   set "SKIP="
   if /i "!T!"=="binds_logic_test" (
-    if "%GOLD%"=="" (set "SKIP=1") else (set ARG="%GOLD%")
+    if "%GOLD%"=="" (set "SKIP=needs dlvr_binds.default.scr as the first argument") else (set ARG="%GOLD%")
   )
+  rem vsclass_c1_test classifies shaders cut from the game's shader pack: three folders of .dxbc, not in the repo.
+  if /i "!T!"=="vsclass_c1_test" set "SKIP=needs three folders of captured .dxbc shaders (not in the repo)"
   if defined SKIP (
-    echo SKIPPED       !T!  - needs dlvr_binds.default.scr as the first argument
+    echo SKIPPED       !T!  - !SKIP!
     set /a NSKIP+=1
   ) else (
     if not exist "%OUT%\!T!" mkdir "%OUT%\!T!"

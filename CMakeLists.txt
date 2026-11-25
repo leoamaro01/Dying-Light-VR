@@ -386,10 +386,25 @@ set_source_files_properties(${SRC_ROOT}/launcher/launcher_main.cpp ${SRC_ROOT}/l
 # builds are NEVER auto-deployed: DLVR_GAME_DIR is Jay's DEV install. tools/deploy_variant.py installs BETA or DEV on
 # demand. Only this copy of CMakeLists has the option; src/ deploys as before.
 option(DLVR_BETA_BUILD "The BETA tree: build into build/Release only, never deploy" ON)
+# Fork: deploying is its own switch, so the lean BETA build can be copied into a local game folder without also turning
+# the DEV flavour on. Default keeps upstream's behaviour (deploy only when not BETA). Set it with DLVR_GAME_DIR, e.g. in
+# CMakeUserPresets.json (not committed).
 if(DLVR_BETA_BUILD)
-    message(STATUS "DLVR BETA tree: POST_BUILD deploy is OFF - use tools/deploy_variant.py beta")
+    set(_dlvr_deploy_default OFF)
+else()
+    set(_dlvr_deploy_default ON)
 endif()
-if(NOT DLVR_BETA_BUILD)
+option(DLVR_DEPLOY "POST_BUILD: copy the two mod DLLs and the FFX DLLs into DLVR_GAME_DIR" ${_dlvr_deploy_default})
+if(DLVR_DEPLOY)
+    if(NOT EXISTS "${DLVR_GAME_DIR}/engine_x64_rwdi.dll")
+        message(FATAL_ERROR "DLVR_DEPLOY is ON but DLVR_GAME_DIR ('${DLVR_GAME_DIR}') has no engine_x64_rwdi.dll - "
+                            "point it at the Dying Light install folder")
+    endif()
+    message(STATUS "DLVR: POST_BUILD deploy is ON -> ${DLVR_GAME_DIR}")
+else()
+    message(STATUS "DLVR: POST_BUILD deploy is OFF - output stays in build/<config>")
+endif()
+if(DLVR_DEPLOY)
     foreach(tgt xinput1_3 LibOVRRT64_1)
         add_custom_command(TARGET ${tgt} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different

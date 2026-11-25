@@ -47,9 +47,11 @@ cmake --build build --config Release --target DyingLightVR_Launcher    # EXCLUDE
 ```
 
 CMake options:
-- `DLVR_BETA_BUILD` (default **ON** in this tree) builds into `build/Release` only, with **no auto-deploy**. It defines
-  `DLVR_BETA_LEAN` (periodic logs, help text and arm capture are compiled out) and emits PDBs. With it OFF, POST_BUILD
-  copies the DLLs and FFX DLLs into `DLVR_GAME_DIR` (default is the upstream dev's `D:/SteamLibrary/...`, so set it).
+- `DLVR_BETA_BUILD` (default **ON** in this tree) defines `DLVR_BETA_LEAN` (periodic logs, help text and arm capture
+  are compiled out) and emits PDBs.
+- `DLVR_DEPLOY` (fork addition; defaults to `NOT DLVR_BETA_BUILD`) makes POST_BUILD copy the two DLLs and the FFX DLLs
+  into `DLVR_GAME_DIR`. Configure fails if that folder has no `engine_x64_rwdi.dll`. Per-machine values go in the
+  git-ignored `CMakeUserPresets.json`: `cmake --preset local`, then `cmake --build --preset local`.
 - These are diagnostic-only and default OFF: `DLVR_HANG_WATCH`, `DLVR_CTXSITE_FAULT_TEST`, `DLVR_SWING_PROBE` and
   `DLVR_YAW_PROBE`. Use a separate build folder for them.
 
@@ -69,11 +71,12 @@ src\tests\run_tests.bat [path\to\dlvr_binds.default.scr] [output folder]
 - Each `src/tests/*_test.cpp` is compiled on its own (`cl /W4 /std:c++17`), with `puff.c` linked in. Each test runs
   from `src/tests/`. The exit code is the failure count. **New tests are picked up automatically** and need no
   registration. Output goes to `%TEMP%\dlvr_tests` by default, never into the tree.
-- `binds_logic_test` is SKIPPED unless you pass the golden `dlvr_binds.default.scr`.
+- `binds_logic_test` is SKIPPED unless you pass the golden `dlvr_binds.default.scr`. `vsclass_c1_test` is always
+  SKIPPED: it needs three folders of shaders cut from the game's shader pack, which aren't in the repo.
 - Tests use a local `CHECK(cond)` macro that prints `FAIL file:line` and counts failures. Copy that pattern. There is
   no test framework.
 - Include paths available to tests: `src`, `src/ovr2xr`, `src/bootstrap`, `src/setup`, `src/common`, `src/tests`,
-  `src/third_party/puff`. **Not** `src/launcher`, so launcher tests include their header by relative path.
+  `src/launcher`, `src/third_party/puff`.
 
 The game itself is the only real integration test. Note in your summary which changes still need a run in the headset.
 
