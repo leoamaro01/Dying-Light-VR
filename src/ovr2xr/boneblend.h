@@ -1009,6 +1009,9 @@ void SnapTurnQueue(int dir);
 // 1 = the camyaw detour is committed and snaps will be applied; 0 = not installed yet; -1 = the install failed or
 // was refused for this session. *why (optional) names the reason for 0 / -1.
 int SnapTurnStatus(const char** why);
+// Hand climbing P4's look probe (climbhand.cpp): LookController's look window and the player's camera / look yaw and look pitch this
+// update - out = { maxYaw, maxPitch, minYaw, minPitch, camYaw, lookYaw, lookPitch } (the window NaN unless *isLook). Game thread.
+bool HangLookSample(uintptr_t player, float out[7], bool* isLook);
 // comfort_body_follows_head's status by name, once per change - ovr2xr.cpp calls it every pad poll (pad thread).
 void HeadFollowStatusTick();
 

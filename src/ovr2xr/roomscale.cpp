@@ -603,6 +603,23 @@ void RoomscaleProbeTick()
     if (probeDue || !g_vtSaid || vt != g_lastVt) { ProbeLine(player, group, full, vt, why); }
 }
 
+bool RoomscaleResolveForProbe(uintptr_t* player, uintptr_t* full, int* group, float worldPos[3], const char** why)
+{
+    *player = 0;
+    *full = 0;
+    *group = -99;
+    worldPos[0] = worldPos[1] = worldPos[2] = NAN;
+    if (!Resolve()) {
+        *why = g_state == -1 ? "the engine exports roomscale needs are missing (see the [ROOMSCALE] REFUSED line)" : "modules not mapped";
+        return false;
+    }
+    uintptr_t vt = 0;
+    *full = ResolveWalk(player, group, &vt, why);
+    if (!*player) { return false; }
+    CallWorldPos(reinterpret_cast<void*>(*player + 0x18), worldPos);
+    return true;
+}
+
 bool RoomscaleLive() { return g_hook == 1 && g_playerFull != 0; }
 int  RoomscaleGroup() { return static_cast<int>(g_group); }
 bool RoomscaleOnFoot(int group) { return (group >= 0 && group <= 6) || group == 25; }

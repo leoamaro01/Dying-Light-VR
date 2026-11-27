@@ -6,6 +6,8 @@
 // appSpace shift) and hands the command over.
 #pragma once
 
+#include <cstdint>   // uintptr_t - RoomscaleResolveForProbe
+
 namespace dlvr {
 
 extern bool  DiagRoomscaleProbe;   // diag_roomscale_probe - Task 7a's log-only probe. DEFAULT OFF.
@@ -16,6 +18,12 @@ extern float RoomscaleLeanMaxM;    // roomscale_lean_max_m - how far the view ma
 // body + controller group (published for the detour / render thread) and the pre-step detour's one-time install. Both off: two
 // bool tests.
 void RoomscaleProbeTick();
+
+// Game thread. The climbing P0 probe (climbprobe.cpp, docs/design_climbing_overhaul.md §6 P0) borrows this file's resolver instead of a
+// second copy: the PlayerDI, the walk body's full object (0 + why when it is not CODEPhysicsWalkFly's - refused by vtable, as here),
+// the controller group and the control object's world position. Read-only. False only when the engine exports are missing or no
+// player exists yet (*why says which); *full may be 0 with a true return.
+bool RoomscaleResolveForProbe(uintptr_t* player, uintptr_t* full, int* group, float worldPos[3], const char** why);
 
 // Render thread (ovr2xr.cpp BeginFrameIfNeeded).
 bool RoomscaleLive();                          // the pre-step detour is installed and the player's walk body is known

@@ -63,6 +63,8 @@
 #include "pushgrab.h"   // open-hand push and grab (plan 2026-10-31-open-hand-push-and-grab): the enemy_push_grab / push_* settings
 #include "coopnet.h"    // co-op arm-pose channel (plan 2026-11-13-coop-arm-pose-channel): the coop_pose setting
 #include "roomscale.h"  // roomscale (plan 2026-10-27-roomscale-physical-crouch Task 7a): the diag_roomscale_probe setting
+#include "climbprobe.h" // climbing P0 (docs/design_climbing_overhaul.md §6): the diag_climb_probe setting
+#include "climbhand.h"  // hand climbing P1 (same doc): climb_by_hand / climb_reach_m + ClimbHandPoll in the scePad filter
 #include "physcrouch.h" // physical crouch (same plan, Task 9): its settings + PhysCrouchPoll in the scePad filter
 #include "bownock.h"
 #include "boneblend.h"
@@ -1301,11 +1303,15 @@ const char* const kMeleeSwingMode[] = { "off (nothing installed)", "detect only 
 // the config: dump) and compiles with empty text: the condition is a constant expression, so the unchosen literal is
 // never referenced and never emitted.
 #if defined(DLVR_BETA_LEAN)
-constexpr bool BetaTextKept(const char* grp)
+constexpr bool BetaGroupIs(const char* grp, const char* k)
 {
-    const char* k = "VR Comfort";
     while (*grp && *grp == *k) { ++grp; ++k; }
     return *grp == '\0' && *k == '\0';
+}
+// + "Physical Parkour" (2026-11-27): its own BETA tab (overlay.cpp DrawParkourTab) draws the climb_ rows' labels and help.
+constexpr bool BetaTextKept(const char* grp)
+{
+    return BetaGroupIs(grp, "VR Comfort") || BetaGroupIs(grp, "Physical Parkour");
 }
 #define DLVR_BETA_TEXT(grp, text) (BetaTextKept(grp) ? (text) : "")
 // LOCKED and FOLLOWS entries are never drawn on any tab (settings.h `locked`), so BETA drops their text whatever the
@@ -2153,6 +2159,102 @@ const Setting kSettings[] = {
             "Controller Bindings", "How much a held severed limb's turning is calmed. 1 = no overshoot; higher = slower, steadier."),
     S_FLOAT("body_grab_hitbox_margin_m", dlvr::BodyGrabHitboxMarginM, 0.0f, 0.3f, "Grab: hitbox margin (m)", "Controller Bindings",
             "How far outside a body part's hitbox (or a severed limb's) your hand can be and still grab it."),
+    // Hand climbing P1 (docs/design_climbing_overhaul.md §6, 2026-11-25): a prototype, OFF by default. Takes effect at once (the
+    // start detour installs on the first player update that sees it on; off again = the detour passes everything through).
+    // 2026-11-27 (tester: "add a new section to the L3 + R3 in-game mod menu, called Physical Parkour"): every climb_ row is in the
+    // "Physical Parkour" group - overlay.cpp's Physical Parkour tab draws them in sections (DrawParkourTab), and BetaTextKept keeps
+    // that group's text in the BETA build. Labels no longer repeat "Climb by hand:" (the tab and its section headings say it).
+    S_BOOL("climb_by_hand", dlvr::ClimbByHand, "Climb ledges by hand (prototype)", "Physical Parkour",
+           "PROTOTYPE. ON: the game no longer grabs ledges by itself when you look at one and hold jump. Instead, close a grip with "
+           "your hand on a ledge to grab it - it also catches a ledge if you keep the grip closed while falling past it - and open "
+           "both grips while hanging to let go. While hanging, the stick still shimmies and climbs up, and the jump button still "
+           "jumps, as before. Wall runs, tic-tacs, vaults and step-overs are not affected. OFF: climbing is the game's own."),
+    S_FLOAT("climb_reach_m", dlvr::ClimbReachM, 0.10f, 0.60f, "Grab reach (m)", "Physical Parkour",
+            "How close your hand must be to a ledge's edge for a grip to grab it."),
+    S_INT("climb_catch_ms", dlvr::ClimbCatchMs, 0, 5000, "Catch time (ms)", "Physical Parkour",
+          "After you close a grip, how long it keeps looking for a ledge - long enough to close your hand before you reach the ledge, "
+          "or while you fall past one."),
+    S_BOOL("climb_always_hang", dlvr::ClimbAlwaysHang, "Hang from high ledges", "Physical Parkour",
+           "ON: grabbing a ledge above head height hangs from it, even when there is room to climb onto it - press jump (or later, pull) "
+           "to climb up. OFF: the game decides, and climbs straight over whenever it can."),
+    S_FLOAT("climb_hang_min_m", dlvr::ClimbHangMinM, 1.2f, 3.0f, "Hang from (m above your feet)", "Physical Parkour",
+            "How high a ledge must be for 'hang from high ledges' to hang from it. Lower ledges are climbed over."),
+    S_FLOAT("climb_auto_low_m", dlvr::ClimbAutoLowM, 0.0f, 2.0f, "Low walls up to (m)", "Physical Parkour",
+            "With 'game climbs low walls' on: walls whose top is at most this high above your feet still climb the game's own way "
+            "(look at them and jump), no hands needed. 0 = every ledge needs a hand."),
+    S_BOOL("climb_hand_motion", dlvr::ClimbHandMotion, "Move with your hands while hanging", "Physical Parkour",
+           "ON: while hanging from a ledge, your body follows your hands - pull down to rise, reach up to lower yourself. Move along "
+           "a ledge hand over hand: grab further along with the free hand, then let go with the other. OFF: the hang holds still."),
+    S_FLOAT("climb_pull_max_mps", dlvr::ClimbPullMaxMps, 1.0f, 8.0f, "Fastest hand pull (m/s)", "Physical Parkour",
+            "The fastest your hands can move your body while hanging."),
+    S_FLOAT("climb_release_m", dlvr::ClimbReleaseM, 0.2f, 1.0f, "Hand lets go beyond (m)", "Physical Parkour",
+            "While hanging, each hand is held on the ledge point it grabbed. A hand pulled farther than this from it lets go of the "
+            "ledge (close the grip again to re-grab). Never less than the reach + 0.1 m."),
+    S_BOOL("climb_ledge_last", dlvr::ClimbLedgeLast, "Two ledges held: use the last one grabbed", "Physical Parkour",
+           "When your hands hold two different ledges, climbing up uses the ledge you grabbed last. OFF: the average of the two."),
+    S_BOOL("climb_stick_shimmy", dlvr::ClimbStickShimmy, "Stick shimmies while hanging", "Physical Parkour",
+           "While hanging, the left stick sideways or up shimmies along the ledge (the game's own). OFF: move along ledges with your "
+           "hands only; the stick only climbs up (with 'Stick forward climbs up')."),
+    S_BOOL("climb_body_follows_view", dlvr::ClimbBodyFollowsView, "Body turns with your view while hanging", "Physical Parkour",
+           "While hanging, your body keeps turning to face where you look (around corners too). Needs 'body follows head' on. OFF: the "
+           "body stays facing the wall it grabbed."),
+    S_BOOL("climb_view_rigid", dlvr::ClimbViewRigid, "Steady view while climbing", "Physical Parkour",
+           "While climbing, the view stays at your standing eye height on the body and ignores what the hanging and climbing "
+           "animations do to the character's head - only your body's movement and your own head move it. OFF: the view follows the "
+           "character's head ('Smooth view while climbing' then softens it)."),
+    S_BOOL("climb_hold_body", dlvr::ClimbHoldBody, "Upright body while climbing", "Physical Parkour",
+           "While climbing, your character's spine, neck and head keep the upright pose they had when you grabbed, instead of the "
+           "hanging and climbing animations bending the torso forward over the ledge. Your arms still follow your hands. Needs "
+           "'keep your body still when you pull out a grenade or other throwable' on (it uses the same hold)."),
+    S_BOOL("climb_view_smooth", dlvr::ClimbViewSmooth, "Smooth view while climbing", "Physical Parkour",
+           "While climbing, the view glides after your character's head instead of snapping with the hanging and climbing animations. "
+           "Your own head movement is never smoothed. Not used while 'Steady view while climbing' is on. OFF: the view sits exactly "
+           "on the character's eyes."),
+    S_BOOL("climb_pin_hands", dlvr::ClimbPinHands, "Hands stay on the ledge", "Physical Parkour",
+           "While hanging, each hand that holds a ledge is drawn on the ledge where it grabbed, not where your controller is. OFF: the "
+           "hands follow your controllers."),
+    S_BOOL("climb_mantle_stick", dlvr::ClimbMantleStick, "Stick forward climbs up", "Physical Parkour",
+           "While hanging, push the left stick forward to climb up onto the ledge (the game's own climb-up). The game never climbs up "
+           "by itself while you hang (for example after a jump up). OFF: the stick does not climb up either."),
+    S_BOOL("climb_mantle_auto", dlvr::ClimbMantleAuto, "Pull up to climb up", "Physical Parkour",
+           "While hanging, pull yourself up until the ledge is low enough (the height below) and hold still there a moment: the game's "
+           "own climb-up runs. A fast pull you let go of is a jump, not a climb-up."),
+    S_FLOAT("climb_mantle_m", dlvr::ClimbMantleM, 0.0f, 1.6f, "Pull-up climb height (m)", "Physical Parkour",
+            "With 'pull up to climb up' on: the climb-up starts once the ledge you hold is this far above your feet or less."),
+    S_BOOL("climb_auto_low", dlvr::ClimbAutoLow, "Game climbs low walls", "Physical Parkour",
+           "ON: walls up to the low-wall height still climb the game's way (look at them and jump). OFF: every ledge needs your hands."),
+    S_FLOAT("climb_launch_min_mps", dlvr::ClimbLaunchMinMps, 0.0f, 4.0f, "Launch when letting go faster than (m/s)",
+            "Physical Parkour",
+            "Let go of the ledge while your hands are still pulling you fast and you keep flying: up to grab a higher ledge, or away "
+            "from the wall if you push off it. Slower than this is a plain drop. 0 = never launch."),
+    S_FLOAT("climb_launch_scale", dlvr::ClimbLaunchScale, 0.5f, 2.0f, "Launch boost", "Physical Parkour",
+            "Multiplies your pull's speed into the launch, so a smaller motion jumps as far. Never more than the game's own jump: at "
+            "most its default jump height (1.01 m) up and its wall push-off speed (3 m/s) sideways."),
+    S_FLOAT("climb_launch_up_assist", dlvr::ClimbLaunchUpAssist, 0.0f, 1.0f, "Upward launch assist",
+            "Physical Parkour",
+            "Turns a mostly-upward launch toward straight up, as the game's own up jumps are. 0 = none (you jump the way you pulled), "
+            "0.5 = half the angle (30 degrees off becomes 15), 1 = always straight up. Push-offs are never bent."),
+    S_BOOL("climb_air_momentum", dlvr::ClimbAirMomentum, "Keep momentum in the air", "Physical Parkour",
+           "After a launch you keep the speed you jumped with until you land: walls and ledges still stop you, and only air drag "
+           "slows you down; the stick steers as much as 'Air control' allows. OFF: after a launch the stick steers in the air as "
+           "well, never adding speed on top of the launch."),
+    S_FLOAT("climb_air_control", dlvr::ClimbAirControl, 0.0f, 1.0f, "Air control", "Physical Parkour",
+            "How much the stick can steer you in the air while 'Keep momentum in the air' is on. Its push is added to your "
+            "momentum. 0 = none (pure momentum), 1 = the game's own air steering force, 0.5 = half of it. The stick never "
+            "pushes you faster than it would move you on its own."),
+    S_BOOL("climb_air_momentum_all", dlvr::ClimbAirMomentumAll, "Keep momentum on every jump and fall", "Physical Parkour",
+           "'Keep momentum in the air' for all air time - the game's own jumps and falls too, not only launches from a ledge. "
+           "OFF: only launches; the game's own jumps steer with the stick as usual."),
+    S_FLOAT("climb_air_drag", dlvr::ClimbAirDrag, 0.0f, 2.0f, "Air drag", "Physical Parkour",
+            "How quickly a launch loses its sideways speed in the air, per second. 0 = none, 0.1 = about 10% in the first second. "
+            "Only with 'Keep momentum in the air' on."),
+    // REMOVED 2026-11-27 (tester: "remove the engine collision view and the raycast debug line draws ... delete the code that triggers
+    // from them"): both features' code is gone. The keys stay LOCKED (AGENTS.md: a key is never dropped from the table) - never read
+    // from the file, never drawn, pinned off; their variables (climbhand.cpp) are read by nothing.
+    S_BOOL_LOCKED("climb_debug_draw", dlvr::ClimbDebugDraw, "Show the ledge search (removed)", "Physical Parkour",
+                  "Removed: drew the ledge search's rays in the headset."),
+    S_INT_LOCKED("climb_debug_physics", dlvr::ClimbDebugPhysics, 0, 255, "Engine collision view (removed)", "Physical Parkour",
+                 "Removed: the released engine's physics debug view drew nothing."),
     S_BOOL("camo_gesture", dlvr::CamoGesture, "Camouflage by wiping a corpse", "Controller Bindings",
            "Hold an infected corpse, or a limb from one, and wipe it across your face to camouflage yourself - no skill needed. Once "
            "per corpse. Needs Grab bodies by hand. HEADSET only. DEFAULT ON."),
@@ -2258,6 +2360,14 @@ const Setting kSettings[] = {
            "Log-only. Twice a second: the player's walk body (wanted velocity, its guards), the controller group, the control "
            "object's world position, the head we report and the camera's world position with the measured head-to-world yaw - "
            "what roomscale will use. Writes nothing. HEADSET for the map. DEFAULT OFF."),
+    // Climbing P0 (docs/design_climbing_overhaul.md §6, 2026-11-25): NOT inside a DLVR_BETA_LEAN block on purpose - the hand-climbing
+    // work needs it in the fork's normal (beta) build. Off by default, capped (climbprobe_logic.h).
+    S_BOOL("diag_climb_probe", dlvr::DiagClimbProbe,
+           "Log the game's own climbs (diagnostic)", "Physical Parkour",
+           "Log-only. While a ledge grab, ladder / pipe / rope or zipline is active (and 0.6 s after): which controllers are active, the "
+           "ledge grab's type, state, collision flag and velocity, its physics answers, the walk body's velocity and physics flags, the "
+           "player's position and measured speed; one START and one END summary line per climb, and a line whenever the set of active "
+           "controllers changes. Writes nothing. Capped at 8000 lines a session. DEFAULT OFF."),
     S_BOOL("diag_loot_why", dlvr::DiagLootWhy,
            "Diagnostics: [LOOTWHY] why a body gets no loot prompt (log-only)", "Aim",
            "Log-only. Twice a second while a body is near: the game's own gather run three ways (as the game / without the look "
@@ -13350,11 +13460,26 @@ extern "C" __declspec(dllexport) void dlvr_FilterScePad(void* pData)
                        holsterOwnsR || lootSuppressR1 || camoSuppressR1 || lidSuppressR1,
                        pgSuppressL1, pgSuppressR1);
     // (Manual reload's ReloadPadPoll runs ABOVE, before TwoHandPoll - rifle plan Task 5.)
+    // Hand climbing P1 (climbhand.h, docs/design_climbing_overhaul.md §6): LAST of the grip owners - a press any feature above took is
+    // never a ledge grab; a press on the detected ledge (or any press while hanging) is the climb's, not L1 / R1.
+    // climb_by_hand=0 and no climb held -> both false at one bool test.
+    bool climbSuppressL1 = false, climbSuppressR1 = false;
+    // The owner is NAMED (run 2: "presses another feature owned" 2-5 per 5 s and no way to tell which feature took them).
+    const char* const climbOwnerL = holsterOwnsL ? "a holster" : twoHandSuppressL1 ? "the two-handed grip"
+                                  : reloadSuppressL1 ? "the manual reload" : lidSuppressL1 ? "a lid / chest"
+                                  : lootSuppressL1 ? "loot by hand" : pgSuppressL1 ? "the enemy grab" : nullptr;
+    const char* const climbOwnerR = holsterOwnsR ? "a holster" : lidSuppressR1 ? "a lid / chest" : lootSuppressR1 ? "loot by hand"
+                                  : camoSuppressR1 ? "the camouflage block" : pgSuppressR1 ? "the enemy grab" : nullptr;
+    dlvr::ClimbHandPoll(gameMenu || dlvr::OverlayVisible() || dlvr::CalibScreenActive(), climbOwnerL, climbOwnerR,
+                        climbSuppressL1, climbSuppressR1);
     // In an in-game menu the grips are plain L1 / R1 (game-menu pass-through, B) - a withhold that would have applied is counted.
-    if (gameMenu && (holsterSuppressL1 || twoHandSuppressL1 || lootSuppressL1 || pgSuppressL1 || reloadSuppressL1 || lidSuppressL1)) {
+    if (gameMenu && (holsterSuppressL1 || twoHandSuppressL1 || lootSuppressL1 || pgSuppressL1 || reloadSuppressL1 || lidSuppressL1 ||
+                     climbSuppressL1)) {
         ++g_mp.supL1;
     }
-    if (gameMenu && (holsterSuppressR1 || lootSuppressR1 || camoSuppressR1 || pgSuppressR1 || lidSuppressR1)) { ++g_mp.supR1; }
+    if (gameMenu && (holsterSuppressR1 || lootSuppressR1 || camoSuppressR1 || pgSuppressR1 || lidSuppressR1 || climbSuppressR1)) {
+        ++g_mp.supR1;
+    }
     if (g_vrGrip) {
         constexpr float kGripThreshold = 0.5f;
         auto* buttons = reinterpret_cast<uint32_t*>(p);
@@ -13363,13 +13488,14 @@ extern "C" __declspec(dllexport) void dlvr_FilterScePad(void* pData)
         // (+ ReloadWithholdsL1: Jay after RUN XB1 - no L1 from the left grip while a manual crossbow is not loaded. One call.)
         if (dlvr::GetControllerSqueeze(dlvr::kLeftHand, squeezeL) && squeezeL >= kGripThreshold &&
             (gameMenu || (!holsterSuppressL1 && !twoHandSuppressL1 && !lootSuppressL1 && !pgSuppressL1 && !reloadSuppressL1 &&
-                          !lidSuppressL1 && !dlvr::ReloadWithholdsL1()))) {
+                          !lidSuppressL1 && !climbSuppressL1 && !dlvr::ReloadWithholdsL1()))) {
             *buttons |= 0x400u;  // L1
             anyGripPressed = true;
         }
         if (dlvr::GetControllerSqueeze(dlvr::kRightHand, squeezeR) &&
             squeezeR >= kGripThreshold &&
-            (gameMenu || (!holsterSuppressR1 && !lootSuppressR1 && !camoSuppressR1 && !pgSuppressR1 && !lidSuppressR1))) {
+            (gameMenu || (!holsterSuppressR1 && !lootSuppressR1 && !camoSuppressR1 && !pgSuppressR1 && !lidSuppressR1 &&
+                          !climbSuppressR1))) {
             *buttons |= 0x800u;  // R1
             anyGripPressed = true;
         }

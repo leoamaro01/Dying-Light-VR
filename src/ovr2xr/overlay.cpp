@@ -70,6 +70,7 @@ constexpr int kMenuH = 1000;
 void DrawDlssTab();
 void DrawComfortTab();
 void DrawHudTab();        // BETA: every ui_ setting + the Wrist HUD (Jay 2026-11-13: its own tab, after VR Comfort)
+void DrawParkourTab();    // hand climbing's settings (the "Physical Parkour" group), in sections (tester 2026-11-27)
 void DrawControlsTab();
 bool ControlsHoldPad(bool padIdle);
 bool ControlsBusy();      // a Controls-tab capture (or its release drain) owns the controller - B / L3+R3 must not act
@@ -95,6 +96,9 @@ const TabDef kTabs[] = {
     // Jay 2026-11-13: "All the HUD items, including everything that sits in 'UI Master Control' in VR Comfort, will be moved to
     // it's own new HUD/UI Tab" + "After VR Comfort". Name art: dlvr\menu\tab_name_hud.png (Jay's, 228 x 40).
     { "HUD",                 DrawHudTab },
+    // Tester 2026-11-27: "add a new section to the L3 + R3 in-game mod menu, called Physical Parkour" - the hand-climbing settings
+    // (docs/design_climbing_overhaul.md). No name art yet: the tab draws its text (dlvr\menu\tab_name_physical_parkour.png if added).
+    { "Physical Parkour",    DrawParkourTab },
     { "Anti-Aliasing",       DrawDlssTab },   // renamed from "DLSS", Jay 2026-09-26 (PROPOSAL-FSR §8)
     { "Controls",            DrawControlsTab },   // user rebinding, plan 2026-10-28-controls-rebind Task 6
 };
@@ -1357,14 +1361,24 @@ void DrawTabStrip()
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     float x = origin.x;
-    for (int i = 0; i < kTabCount; ++i) {
-        ImGui::PushID(i);
-        float nameW = ImGui::CalcTextSize(kTabs[i].name).x;
+    // 2026-11-27 (the fifth tab, Physical Parkour): four 228-px name images + padding already took ~1120 px, so five overflowed the
+    // panel. When the natural widths do not fit the row, every tab - box, name image and text - is scaled down by the same factor.
+    const auto nameWidth = [](int i) {
+        float w = ImGui::CalcTextSize(kTabs[i].name).x;
         if (const MenuArt* nm = ArtOf(kArtFixedCount + i)) {
             const float s = (std::min)(1.0f, (std::min)(228.0f / nm->w, 40.0f / nm->h));   // ArtFit's scale below
-            nameW = nm->w * s;
+            w = nm->w * s;
         }
-        const float tabW = (std::max)(120.0f, nameW + 2.0f * pad);
+        return w;
+    };
+    float natural = 0.0f;
+    for (int i = 0; i < kTabCount; ++i) { natural += (std::max)(120.0f, nameWidth(i) + 2.0f * pad); }
+    const float room = ImGui::GetContentRegionAvail().x - gap * static_cast<float>(kTabCount - 1);
+    const float fit = natural > room && room > 0.0f ? room / natural : 1.0f;
+    for (int i = 0; i < kTabCount; ++i) {
+        ImGui::PushID(i);
+        const float nameW = nameWidth(i);
+        const float tabW = (std::max)(120.0f, nameW + 2.0f * pad) * fit;
         const ImVec2 p(x, origin.y);
         const ImVec2 q(p.x + tabW, p.y + tabH);
         x += tabW + gap;
@@ -1379,10 +1393,11 @@ void DrawTabStrip()
         const ImVec2 c((p.x + q.x) * 0.5f, (p.y + q.y) * 0.5f);
         const ImU32 col = sel ? IM_COL32_WHITE : IM_COL32(190, 190, 190, 255);
         if (const MenuArt* nm = ArtOf(kArtFixedCount + i)) {
-            ArtFit(dl, nm, c, 228.0f, 40.0f, col);
+            ArtFit(dl, nm, c, 228.0f * fit, 40.0f * fit, col);
         } else {
-            const ImVec2 ts = ImGui::CalcTextSize(kTabs[i].name);
-            dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), col, kTabs[i].name);
+            const float fs = ImGui::GetFontSize() * fit;
+            const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, kTabs[i].name);
+            dl->AddText(ImGui::GetFont(), fs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), col, kTabs[i].name);
         }
         ImGui::PopID();
     }
@@ -1730,6 +1745,9 @@ constexpr const char* kControllerBindingsGroup = "Controller Bindings";
 constexpr const char* kAimGroup = "Aim";
 // The VR Comfort tab's settings (comfort_*), SPEC-VR-COMFORT-2026-09-30. Claimed by GROUP, like the two above.
 constexpr const char* kComfortGroup = "VR Comfort";
+// The Physical Parkour tab's settings (climb_*, diag_climb_probe), 2026-11-27. Claimed by GROUP; ovr2xr.cpp BetaTextKept keeps
+// this group's labels and help in the BETA build.
+constexpr const char* kParkourGroup = "Physical Parkour";
 
 // ---------------------------------------------------------------------------
 // WHICH TAB A SETTING BELONGS TO. 2026-09-13.
@@ -1756,7 +1774,7 @@ constexpr const char* kComfortGroup = "VR Comfort";
 // with NO error. A prefix rule would file them under Diagnostic, next to
 // switches that are genuinely safe to toggle, which is precisely the mistake
 // this project has already paid for by naming them `diag_`.
-enum class Tab { Settings, Camera, Dlss, Rigging, Diagnostic, Aim, Bindings, Comfort, Hud };
+enum class Tab { Settings, Camera, Dlss, Rigging, Diagnostic, Aim, Bindings, Comfort, Hud, Parkour };
 
 bool KeyHasPrefix(const char* key, const char* prefix)
 {
@@ -1775,6 +1793,7 @@ Tab TabForSetting(const Setting& st)
     if (strcmp(st.group, kControllerBindingsGroup) == 0) { return Tab::Bindings; }
     if (strcmp(st.group, kAimGroup) == 0)                { return Tab::Aim; }
     if (strcmp(st.group, kComfortGroup) == 0)            { return Tab::Comfort; }
+    if (strcmp(st.group, kParkourGroup) == 0)            { return Tab::Parkour; }   // before the diag_ prefix rule (diag_climb_probe)
 
     // THE EXPLICIT EXCEPTIONS, before any prefix rule can claim them.
     static const char* const kRigMasterEnables[] = {
@@ -2689,6 +2708,63 @@ void DrawHudTab()
         DrawWristHud();
         ImGui::TreePop();
     }
+    SaveSettingsIfChanged();
+}
+
+// THE PHYSICAL PARKOUR TAB (tester 2026-11-27: "add a new section to the L3 + R3 in-game mod menu, called Physical Parkour, and put
+// all the settings we've added so far in neat sections"). Every "Physical Parkour" setting (TabForSetting -> Tab::Parkour): the
+// master switch on top, then one closed section per part of the climb (docs/design_climbing_overhaul.md). A key of the group that no
+// section names lands in "Other", so a setting added later is never unreachable. climb_debug_draw / climb_debug_physics were removed
+// 2026-11-27 (locked keys: never drawn).
+void DrawParkourTab()
+{
+    struct Section { const char* heading; const char* id; const char* const* keys; int n; };
+    static const char* const kGrab[] = { "climb_reach_m", "climb_catch_ms", "climb_always_hang", "climb_hang_min_m" };
+    static const char* const kHang[] = { "climb_hand_motion", "climb_pull_max_mps", "climb_release_m", "climb_pin_hands",
+                                         "climb_body_follows_view", "climb_view_rigid", "climb_hold_body", "climb_view_smooth", "climb_stick_shimmy" };
+    static const char* const kUp[] = { "climb_mantle_stick", "climb_mantle_auto", "climb_mantle_m", "climb_ledge_last" };
+    static const char* const kLaunch[] = { "climb_launch_min_mps", "climb_launch_scale", "climb_launch_up_assist",
+                                           "climb_air_momentum", "climb_air_momentum_all", "climb_air_control", "climb_air_drag" };
+    static const char* const kLow[] = { "climb_auto_low", "climb_auto_low_m" };
+    static const char* const kDebug[] = { "diag_climb_probe" };
+    static const char* const kTop[] = { "climb_by_hand" };
+    static const Section kSections[] = {
+        // (counts from the arrays: the hang list said 6 while holding 7, so climb_stick_shimmy was never drawn in its section)
+        { "Grabbing ledges", "pk_grab", kGrab, static_cast<int>(sizeof(kGrab) / sizeof(kGrab[0])) },
+        { "Moving while hanging", "pk_hang", kHang, static_cast<int>(sizeof(kHang) / sizeof(kHang[0])) },
+        { "Climbing up", "pk_up", kUp, static_cast<int>(sizeof(kUp) / sizeof(kUp[0])) },
+        { "Launching off", "pk_launch", kLaunch, static_cast<int>(sizeof(kLaunch) / sizeof(kLaunch[0])) },
+        { "Low walls", "pk_low", kLow, static_cast<int>(sizeof(kLow) / sizeof(kLow[0])) },
+        { "Debug", "pk_debug", kDebug, static_cast<int>(sizeof(kDebug) / sizeof(kDebug[0])) },
+    };
+    const auto in = [](const char* key, const char* const* keys, int n) {
+        for (int i = 0; i < n; ++i) { if (strcmp(key, keys[i]) == 0) { return true; } }
+        return false;
+    };
+    int count = 0;
+    const Setting* all = AllSettings(count);
+    const auto mine = [](const Setting& st) { return !st.locked && TabForSetting(st) == Tab::Parkour; };
+    for (int i = 0; i < count; ++i) {   // the master switch, outside any section
+        if (mine(all[i]) && in(all[i].key, kTop, 1)) { DrawOneSetting(all[i], i); }
+    }
+    const auto section = [&](const char* heading, const char* id, auto pick) {
+        bool any = false;
+        for (int i = 0; i < count && !any; ++i) { any = mine(all[i]) && pick(all[i]); }
+        ImGui::Spacing();
+        if (!any || !MenuSection(heading, id, true)) { return; }
+        for (int i = 0; i < count; ++i) {
+            if (mine(all[i]) && pick(all[i])) { DrawOneSetting(all[i], i); }
+        }
+        ImGui::TreePop();
+    };
+    for (const Section& s : kSections) {
+        section(s.heading, s.id, [&](const Setting& st) { return in(st.key, s.keys, s.n); });
+    }
+    section("Other", "pk_other", [&](const Setting& st) {
+        if (in(st.key, kTop, 1)) { return false; }
+        for (const Section& s : kSections) { if (in(st.key, s.keys, s.n)) { return false; } }
+        return true;
+    });
     SaveSettingsIfChanged();
 }
 

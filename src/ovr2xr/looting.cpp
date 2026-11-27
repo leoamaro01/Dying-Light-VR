@@ -1754,6 +1754,13 @@ void LootPoll(bool vrGrip, bool leftOwned, bool rightOwned, bool& withholdL1, bo
 // of those, and the limb reading still due: the press poll itself (LootPoll asks for the fresh query later in this poll) or
 // BodyGrabRelictPending for < kLateArmS. COST: called only on a hip press edge and while that press is Pending (<= 150 ms) - one
 // HandWorld (cached reads), one NearestBox (<= 16 boxes), ContainerState (<= 5 guarded reads) with a body in reach, two lock-free reads.
+// Hand climbing P1 (climbhand.cpp, docs/design_climbing_overhaul.md §6): the same hand-in-game-world HandWorld gives loot, so a
+// climbing grab and a loot grab measure reach from the same point. Pad thread. hand 0 = LEFT, 1 = RIGHT.
+bool LootHandWorldPos(int hand, float out[3])
+{
+    float trk[3], rot[4];
+    return HandWorld(hand == 0 ? kLeftHand : kRightHand, out, trk, rot);
+}
 holster::Yield LootYieldAt(int hand, bool pressEdge, float* outDist, bool* outLimb, double* outWaitS)
 {
     static double s_pressS[2] = {};

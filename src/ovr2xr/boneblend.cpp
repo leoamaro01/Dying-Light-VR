@@ -33,6 +33,8 @@
 #include "reload_hands.h"          // reload::PumpAnimFrame (inline kPumpAnim) - PumpFingersApply, the pump's C13 fingers (pump plan Task 4)
 #include "dbarrel_hands.h"         // reload::DbFrameAt (inline kDbOpen / kDbPull / kDbLoad) - DbFingersApply, the double-barrel (2026-11-07)
 #include "roomscale.h"    // RoomscaleProbeTick - roomscale Task 7a's log-only probe, driven from HookTail (plan 2026-10-27)
+#include "climbprobe.h"   // ClimbProbeTick - climbing P0's log-only probe, driven from HookTail (docs/design_climbing_overhaul.md §6)
+#include "climbhand.h"    // ClimbHandTick - hand climbing P1's detour install + 5 s line, driven from HookTail (same doc §6)
 #include "rootyaw_logic.h"   // walk root + spine-top yaw hold math (trace 20261117_1730_root_yaw_hold; BETA port 20261117_1600)
 #include "physcrouch.h"   // physical crouch (plan 2026-10-27 Task 9): EyePointApply publishes the duck factor
 #include "bownock.h"      // BowNockTick / BowNockNoBow - the bow's manual nock (bow_manual_nock), called from BowDrawTick
@@ -13276,6 +13278,16 @@ bool SolveArmIk(const ArmSide& side)
         }
     }
 
+    // [LOADBEARING: climb_pin_hands] hand climbing P4 (docs/design_climbing_overhaul.md §4.8): a hand holding a ledge is DRAWN on the
+    // ledge point it holds - T moves by (that point - the hand), the pad thread's own measure (climbhand.cpp ClimbHandPinShift). After
+    // the collision stops (the ledge wins), before the reach clamp (the arm still cannot stretch). COST off / not holding: one bool
+    // test + a shared lock.
+    {
+        float pin[3];
+        if (ClimbHandPinShift(aidx == 0 ? 1 : 0, pin)) {   // arm 0 = right = climbing hand 1
+            T[0] += pin[0]; T[1] += pin[1]; T[2] += pin[2];
+        }
+    }
     float v[3] = { T[0]-S[0], T[1]-S[1], T[2]-S[2] };
     float d = VecLen(v[0], v[1], v[2]);
     // [PROBE: HEADTURN] gate=diag_head_turn  site=HEADSET  log-only=yes
@@ -20691,6 +20703,12 @@ void __fastcall HookTail(void* ent)
     // diag_roomscale_probe (plan 2026-10-27-roomscale-physical-crouch Task 7a): log-only, after the frame's physics step, so the
     // control object's world position is this update's. Off: one bool test; on: roomscale.cpp's 0.5 s cost.
     RoomscaleProbeTick();
+    // diag_climb_probe (docs/design_climbing_overhaul.md §6 P0): log-only, right after the roomscale probe for the same reason (this
+    // update's world position). Off: one bool test; on: climbprobe.cpp's per-update cost (table reads; more only inside a climb).
+    ClimbProbeTick();
+    // climb_by_hand (docs/design_climbing_overhaul.md §6 P1): installs the ledge-grab start detour the first time the switch is on, and
+    // writes the 5 s [CLIMBHAND] line. Off and not installed: one bool test.
+    ClimbHandTick();
     // breakout_physical (plan 2026-10-24-physical-breakout Task 3): after this frame's grab update (RESEARCH-BREAKOUT "Build
     // constants" (a): OnFrame :250 updates the GrabController, OnPostUpdate :430 runs this tail, one thread). Off: one bool test;
     // on: breakout.cpp BreakoutTick's cost (guarded reads; a game call only once per shove).
@@ -21921,7 +21939,11 @@ void Before(uintptr_t a1, float h, float dt)
     const bool on = ComfortBodyFollowsHead;
     uintptr_t vt = 0;
     bool fault = false;
-    const bool owned = on && snap::LookOwned(a1, vt, fault);
+    // [LOADBEARING: climb_by_hand head-follow pause] (hand climbing P2 round 4, docs/design_climbing_overhaul.md §8.13; tester
+    //      2026-11-26: "it snaps my eyes back ... the snapping should go"): while the ledge grab runs with hands climbing, the fold is
+    //      paused as if another controller owned the look - turning the hanging body with the head swings the head bone the camera
+    //      sits on. The outstanding yaw folds in when the climb ends (the paused path's own resume). COST: two bool tests + one read.
+    const bool owned = on && !ClimbHandFreezesBody() && snap::LookOwned(a1, vt, fault);
     const float prevFolded = g_s.folded;
     const unsigned long long prevObj = g_s.obj;
     headfollow::Step st = headfollow::Update(g_s, a1, h, owned);
@@ -22790,13 +22812,31 @@ Reason Decide(uintptr_t a1, const float* w, float* send)
     return kFixed;
 }
 
+// MoveController is the player's active controller (walking / jumping / falling - not a ladder, rope, zipline, vehicle, climb).
+bool MoveCtlActive(uintptr_t a1)
+{
+    __try {
+        const uintptr_t mc = g_supplier(a1);
+        return mc != 0 && *reinterpret_cast<const uintptr_t*>(mc) == g_moveVt;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void* __fastcall Hook(uintptr_t a1, float* w)
 {
     if (reinterpret_cast<uintptr_t>(_ReturnAddress()) != g_ret || !w) { return g_true(a1, w); }   // other callers: untouched
     float send[3];
+    // [LOADBEARING: climb_hand_motion] hand climbing P2 (docs/design_climbing_overhaul.md §8.1 (b), §8.4): while the ledge grab
+    //      hangs, the body moves at the velocity this call hands the physics; the hands' velocity replaces the game's zero. The
+    //      active controller is then EdgeGrab, never MoveController, so the look-turn below passes it through anyway.
+    //      P4 round 5: after a launch the override also adds the launch's horizontal speed to the walk's own vector (the carry), so
+    //      it runs AFTER the look-turn and takes its result. COST off / not climbing: two bool tests.
     const Reason r = Decide(a1, w, send);
     InterlockedIncrement64(&g_win[r]);
     Window(GetTickCount64());
+    float climb[3];
+    if (ClimbByHand && ClimbHandWalkOverride(a1, send, climb, MoveCtlActive(a1))) { return g_true(a1, climb); }
     return g_true(a1, send);
 }
 
@@ -22805,11 +22845,12 @@ void* __fastcall Hook(uintptr_t a1, float* w)
 void Install()
 {
     if (g_installed) { return; }
-    if (!ComfortBodyFollowsHead) {
+    // (+ climb_by_hand: hand climbing P2 sends its velocity through this detour - ClimbHandWalkOverride)
+    if (!ComfortBodyFollowsHead && !ClimbByHand) {
         if (InterlockedCompareExchange(&g_saidOff, 1, 0) == 0) {
             // [PROBE: WALKLOOK] gate=comfort_body_follows_head (install)  site=HEADSET  log-only=no
-            LOG("boneblend: [WALKLOOK] NOT INSTALLED - comfort_body_follows_head=0 (walking is the game's own; switching it on "
-                "installs the hook on the next rig tick)");
+            LOG("boneblend: [WALKLOOK] NOT INSTALLED - comfort_body_follows_head=0 and climb_by_hand=0 (walking is the game's own; "
+                "switching either on installs the hook on the next rig tick)");
         }
         return;
     }
@@ -22841,8 +22882,9 @@ void Install()
         static_cast<unsigned long long>(kRva), ::dlvr::buildrva::BuildName(::dlvr::buildrva::ModuleBuild(::dlvr::buildrva::kGamedll)),
         g_xform ? "resolved" : "*** NOT RESOLVED ***", ok ? "OK" : "FAILED", committed ? "yes" : "NO", attempts,
         reinterpret_cast<void*>(g_ret), reinterpret_cast<void*>(g_moveVt), reinterpret_cast<void*>(g_supplier),
-        (ok && committed) ? " - LIVE: walking follows the look while body-follows-head folds"
-                          : " - *** NOT LIVE: a held-out arm steers walking this session ***");
+        (ok && committed) ? " - LIVE: walking follows the look while body-follows-head folds; hand climbing moves the hanging body"
+                          : " - *** NOT LIVE: a held-out arm steers walking, and hand climbing cannot move a hanging body, this "
+                            "session ***");
 }
 
 }  // namespace walklook
@@ -24926,6 +24968,37 @@ int SnapTurnStatus(const char** why)
                           "which needs diag_bone_blend_probe=1 and the game module loaded";
     }
     return live == 1 ? 1 : (live < 0 ? -1 : 0);
+}
+
+// Hand climbing P4 (log-only probe, climbhand.cpp): the look as the game holds it this update - LookController's own look window
+// (ILookController slots +64 max / +72 min, (yaw, pitch) each - the getters +BA1350 clamps with, read as lookpitch::ReadPitchLimits
+// does) and the player's camera yaw +4460, look yaw +4468 and look pitch +4472. out = { maxYaw, maxPitch, minYaw, minPitch, camYaw,
+// lookYaw, lookPitch }. *isLook = LookController owns the look (the window is only read then). False = not resolved / a fault.
+// Game thread.
+bool HangLookSample(uintptr_t player, float out[7], bool* isLook)
+{
+    *isLook = false;
+    if (!camyaw::lookpitch::g_select || !player) { return false; }
+    uintptr_t iface = 0, vt = 0;
+    if (!camyaw::lookpitch::ActiveIface(player, iface, vt)) { return false; }
+    __try {
+        out[4] = *reinterpret_cast<const float*>(player + 4460);
+        out[5] = *reinterpret_cast<const float*>(player + 4468);
+        out[6] = *reinterpret_cast<const float*>(player + 4472);
+        out[0] = out[1] = out[2] = out[3] = NAN;
+        if (iface && vt - camyaw::lookpitch::g_gd == camyaw::lookpitch::LookVt()) {
+            *isLook = true;
+            const uintptr_t* tbl = *reinterpret_cast<uintptr_t* const*>(iface);
+            alignas(16) unsigned char bmax[16] = {};
+            alignas(16) unsigned char bmin[16] = {};
+            const float* mx = reinterpret_cast<camyaw::lookpitch::PairFn>(tbl[64 / 8])(iface, bmax);
+            const float* mn = reinterpret_cast<camyaw::lookpitch::PairFn>(tbl[72 / 8])(iface, bmin);
+            if (mx && mn) { out[0] = mx[0]; out[1] = mx[1]; out[2] = mn[0]; out[3] = mn[1]; }
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 // comfort_body_follows_head's status, by NAME, outside the rig: camyaw::follow only runs inside the detour, so a run
@@ -27962,6 +28035,7 @@ unsigned  g_ahThrBits[kAhThrCount] = {};
 bool AhThrHoldsT(int p6) { return p6 == 2 || p6 == 5 || p6 == 7 || p6 == 8; }   // hspine, spine2, hspine1, eyecamera
 bool      g_ahThrHeld    = false;   // some of OUR bits are cleared now
 bool      g_ahThrEpisode = false;   // a throwable-out episode is being handled (armed once per episode, never re-armed per poll)
+bool      g_ahThrByClimb = false;   // P4 round 12: this episode was armed by a hand-climb ledge grab (climb_hold_body), not a throwable
 bool      g_ahProved     = false;   // the current g_ahMap passed ANIMHOLD's proof
 bool      g_ahThrSaidWait = false, g_ahThrSaidReady = false;
 LONG64    g_ahThrArms = 0, g_ahThrReleases = 0;
@@ -28111,11 +28185,13 @@ void AhThrStep(uintptr_t pE)
             AhThrRelease(pE, AnimHoldUpper ? "anim_hold_upper now holds these elements itself" : "setting turned off");
         }
         g_ahThrEpisode = false;
+        g_ahThrByClimb = false;
         return;
     }
     if (!g_ahProved || g_ahRefused || !g_ahMap) {
         if (g_ahThrHeld) { AhThrRelease(pE, "ANIMHOLD's proof is gone (refused, unproven or the map moved)"); }
         g_ahThrEpisode = false;
+        g_ahThrByClimb = false;
         if (!g_ahThrSaidWait) {
             g_ahThrSaidWait = true;
             LOG("boneblend: [ANIMHOLD] THROWABLE HOLD WAITING (logged once) - rig_throwable_body_hold=1, but ANIMHOLD has not proven "
@@ -28125,8 +28201,21 @@ void AhThrStep(uintptr_t pE)
         return;
     }
     unsigned b74 = 0, b16 = 0;
-    const int out = AhThrowableOut(&b74, &b16);
+    int out = AhThrowableOut(&b74, &b16);
+    // [LOADBEARING: climb_hold_body] hand climbing P4 round 12 (tester 2026-11-27, after climb_view_rigid: "the body tends to lean
+    //      forward a ton, sometimes actually bending at the torso ... Probably related to animations or poses"): the ledge grab's hang /
+    //      climb clips bend the spine, neck and head forward. While the ledge grab runs in hand mode this same hold arms (the episode
+    //      starts with the grab, so the held pose is the upright one the grab began from) and lets go when it ends. A throwable out
+    //      keeps it armed as before.
+    const bool byClimb = out != 1 && ClimbHoldBody && ClimbHandHanging();
+    if (byClimb) { out = 1; }
     if (out == 1 && !g_ahThrEpisode) {
+        g_ahThrByClimb = byClimb;
+        if (byClimb) {
+            LOG("boneblend: [ANIMHOLD] CLIMB BODY HOLD - a hand-climb ledge grab started: the upper body keeps the pose it has now "
+                "(climb_hold_body), through the hang and the climb-up, until the grab ends (the ARMED line below; '(restore-owed / "
+                "active)' are the throw controller's bytes, 0 here).");
+        }
         g_ahThrEpisode = true;
         const uintptr_t map = SafeReadPtr(pE + 0x1908);
         const uintptr_t trs = SafeReadPtr(pE + 0x1920);
@@ -28141,7 +28230,9 @@ void AhThrStep(uintptr_t pE)
         AhThrArm(map, trs, n, b74, b16);
     } else if (out != 1 && g_ahThrEpisode) {
         g_ahThrEpisode = false;
-        AhThrRelease(pE, out == 0 ? "the throwable is put away (both bytes 0)" : "the throw controller is unreadable");
+        AhThrRelease(pE, g_ahThrByClimb ? "the hand-climb ledge grab ended (climb_hold_body)"
+                         : out == 0     ? "the throwable is put away (both bytes 0)" : "the throw controller is unreadable");
+        g_ahThrByClimb = false;
     } else if (g_ahThrHeld) {
         // While held, once a second: anything that set bit 9 again is re-cleared and counted (as ANIMHOLD's armed tick does).
         const ULONGLONG now = GetTickCount64();
@@ -33118,6 +33209,29 @@ long long       g_epRefSizeSince = 0, g_epRefClimbSince = 0;               // si
 float           g_epRefMaxMm = 0.0f, g_epRefMaxSinceMm = 0.0f;
 bool            g_epWasCrouched = false;
 volatile LONG   g_epSaidClimbOff = 0;
+volatile LONG64 g_epClimbHeld = 0;       // hand climbing P4 round 9: calls that used the standing offset while climbing (run total)
+float           g_epRigidL[3] = {};      // P4 round 11 climb_view_rigid: the standing camera base (game's base + face offset), body-local
+bool            g_epHaveRigid = false;   // game thread
+volatile LONG64 g_epRigidCalls = 0, g_epRigidNoBase = 0;   // calls the rigid view applied / wanted it with no standing base yet
+volatile LONG   g_epSaidClimbHeld = 0;
+
+// The player body's world origin (IControlObject::GetWorldXform of the camera owner, the object EpAddLocal converts into): for
+// climb_view_smooth's eye-from-body offset. False on a fault / nothing resolved.
+bool EpBodyOrigin(__int64 a1, float out[3])
+{
+    if (!g_getWorldXform) { return false; }
+    __try {
+        void* iface = reinterpret_cast<void*>(a1 + 64);
+        void** vt   = *reinterpret_cast<void***>(iface);
+        typedef uintptr_t (__fastcall* GetOwnerFn)(void*);
+        const uintptr_t owner = reinterpret_cast<GetOwnerFn>(vt[1])(iface);   // the same vfunc +8 EpAddLocal / +C75380 call
+        if (!owner) { return false; }
+        const float* x = g_getWorldXform(reinterpret_cast<void*>(owner + 24));
+        if (!x) { return false; }
+        out[0] = x[3]; out[1] = x[7]; out[2] = x[11];
+        return out[0] == out[0] && out[1] == out[1] && out[2] == out[2];
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
 bool EpAddLocal(__int64 a1, const float d[3], float loc[3], uintptr_t* ownerOut, const float cl[3])
 {
@@ -33484,6 +33598,7 @@ void EyePointApply(__int64 a1)
 
     float d1[3] = {}, d2[3] = {};
     float anchorExtraY = 0.0f;   // hand-anchor-only term (the arc drop removed from the view)
+    bool  standingAccepted = false;   // this call refreshed the remembered standing offset (climb_view_rigid remembers its base too)
     if (f > 0.0f) {
         const uintptr_t model = reinterpret_cast<uintptr_t>(BoneProbeCapturedModel());
         float m8[12], m42[12], m44[12];
@@ -33495,8 +33610,36 @@ void EyePointApply(__int64 a1)
             d1[0] = f * raw[0];
             d1[1] = f * raw[1];
             d1[2] = f * raw[2];
+            // [LOADBEARING: climb_view_smooth] CLIMB HOLD (hand climbing P4 round 9, run 16 CAM SNAP lines; tester 2026-11-27: "The
+            //      camera shifting when turning my head while hanging is still there, as strong as ever"): in the hang's poses the face
+            //      bones sit 16-20 cm from the eye bone (65.8 mm standing), turning with the head - and past 0.20 m the check below
+            //      zeroes d1, so the view jumped 19-24 cm between one call and the next (24 of run 16's snaps; every other part moved
+            //      1-2 cm). While a climb runs (and its kEpClimbTailMs tail) with climb_by_hand on, the remembered standing offset is
+            //      used through the eye bone's current orientation (the crouch hold's path): the face stays where a rigid head puts it.
+            const bool climbHeld = ClimbByHand && g_epHaveHold && g_epClimbMs != 0 && nowEp - g_epClimbMs < kEpClimbTailMs;
+            float cr3[9], crn[9], clens[3];
+            bool climbUsed = false;
+            if (climbHeld) {
+                Mtx34To3x3(m8, cr3);
+                if (Mat3NormalizeCols(cr3, crn, clens)) {
+                    for (int r = 0; r < 3; ++r) {
+                        d1[r] = f * (crn[3 * r] * g_epHoldLocal[0] + crn[3 * r + 1] * g_epHoldLocal[1] + crn[3 * r + 2] * g_epHoldLocal[2]);
+                    }
+                    climbUsed = true;
+                    InterlockedIncrement64(&g_epClimbHeld);
+                    if (!InterlockedExchange(&g_epSaidClimbHeld, 1)) {
+                        // [PROBE: EYEPOINT] gate=climb_by_hand  site=HEADSET  log-only=no
+                        LOG("boneblend: [EYEPOINT] CLIMB HOLD FIRST (logged once) - face offset from the eye bone: live %.1f mm, "
+                            "standing value used %.1f mm (before cam_eye_forward %.2f) | while climbing the view keeps the standing "
+                            "offset through the eye bone's orientation", 1000.0f * VecLen(raw[0], raw[1], raw[2]),
+                            1000.0f * VecLen(g_epHoldLocal[0], g_epHoldLocal[1], g_epHoldLocal[2]), f);
+                    }
+                }
+            }
             // A face that is not where the measurement put it (INV-346 era: |mid - eye| 0.066 m) is refused, not applied.
-            if (VecLen(raw[0], raw[1], raw[2]) > 0.20f) {
+            if (climbUsed) {
+                // (the climb hold above; the standing value is neither refreshed nor refused here)
+            } else if (VecLen(raw[0], raw[1], raw[2]) > 0.20f) {
                 d1[0] = d1[1] = d1[2] = 0.0f;
                 InterlockedIncrement64(&g_epNoBones);
             } else {
@@ -33577,6 +33720,7 @@ void EyePointApply(__int64 a1)
                     } else {
                         for (int c = 0; c < 3; ++c) { g_epHoldLocal[c] = rn[c] * raw[0] + rn[3 + c] * raw[1] + rn[6 + c] * raw[2]; }
                         g_epHaveHold = true;
+                        standingAccepted = true;
                         g_epHoldAccMs = nowEp;
                         g_epHoldAccMm = rawMm;
                         g_epRefSizeSince = g_epRefClimbSince = 0;
@@ -33651,7 +33795,64 @@ void EyePointApply(__int64 a1)
         }
     }
     d1[1] += upM;   // cam_eye_up_mm: straight up (world Y), camera AND hand anchor
-    const float d[3] = { d1[0] + d2[0], d1[1] + d2[1], d1[2] + d2[2] };
+    // [LOADBEARING: climb_view_smooth] hand climbing P4 round 5 (docs/design_climbing_overhaul.md §8.15): while the ledge grab runs in
+    //      hand mode the view follows the eye bone's offset from the body smoothly - the hang's look pose, the body turning with the
+    //      view and the game's climb animations glide instead of snapping. vs = smoothed - live offset (world), added to the VIEW and
+    //      the HAND ANCHOR (the drawn hands stay on the controllers); the headset's own arc (d2) is never smoothed. COST not climbing:
+    //      one bool test.
+    float vs[3] = {};
+    float camEye[3] = { NAN, NAN, NAN }, camOrigin[3] = { NAN, NAN, NAN };
+    if (ClimbByHand) {
+        const uintptr_t model = reinterpret_cast<uintptr_t>(BoneProbeCapturedModel());
+        float e8[12], origin[3];
+        if (EpBodyOrigin(a1, origin) && ReadAccessorMtx(g_getWorld, model, E6(8), e8)) {   // [ELEMMAP] eyecamera
+            const float eye[3] = { e8[3], e8[7], e8[11] };
+            ClimbHandViewCorrection(eye, origin, vs);
+            for (int i = 0; i < 3; ++i) { camEye[i] = eye[i]; camOrigin[i] = origin[i]; }
+        }
+    }
+    // P4 round 8 camera trace (climbhand.h ClimbCamSample) / round 11 rigid view: the game's base before this call's additions
+    float camBase[3] = { NAN, NAN, NAN };
+    if (ClimbByHand) {
+        __try {
+            const float* p = reinterpret_cast<const float*>(a1 + 4112);
+            camBase[0] = p[0]; camBase[1] = p[1]; camBase[2] = p[2];
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    // [LOADBEARING: climb_view_rigid] hand climbing P4 round 11 (tester 2026-11-27: "can't we remove the pose changes that affect the
+    //      view altogether? They don't add anything mechanically"): while the ledge grab runs in hand mode the camera base moves
+    //      (eased by rk, ClimbViewRigidK) from the animated head to the STANDING one - g_epRigidL, the game's base + face offset
+    //      (body-local) remembered on the last call that refreshed the standing offset. The face offset d1 and climb_view_smooth's
+    //      vs fade out by the same share (both describe the animated head); the headset's arc d2 is kept whole. The hand anchor gets
+    //      the same world shift, so the drawn hands stay on the controllers.
+    float rk = 0.0f, rigL[3] = {}, rigW[3] = {};
+    if (ClimbByHand && camBase[0] == camBase[0]) {
+        rk = ClimbViewRigidK();
+        if (rk > 0.0f && g_epHaveRigid && g_getWorldXform) {
+            bool ok = false;
+            float x[12] = {};
+            __try {
+                void* iface = reinterpret_cast<void*>(a1 + 64);
+                void** vt   = *reinterpret_cast<void***>(iface);
+                typedef uintptr_t (__fastcall* GetOwnerFn)(void*);
+                const uintptr_t ow = reinterpret_cast<GetOwnerFn>(vt[1])(iface);   // the same vfunc +8 EpAddLocal calls
+                const float* px = ow ? g_getWorldXform(reinterpret_cast<void*>(ow + 24)) : nullptr;
+                if (px) { for (int i = 0; i < 12; ++i) { x[i] = px[i]; } ok = true; }
+            } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+            if (ok) {
+                for (int i = 0; i < 3; ++i) { rigL[i] = rk * (g_epRigidL[i] - camBase[i]); }
+                for (int r = 0; r < 3; ++r) { rigW[r] = x[4 * r] * rigL[0] + x[4 * r + 1] * rigL[1] + x[4 * r + 2] * rigL[2]; }
+                InterlockedIncrement64(&g_epRigidCalls);
+            } else {
+                rk = 0.0f;
+            }
+        } else {
+            if (rk > 0.0f && !g_epHaveRigid) { InterlockedIncrement64(&g_epRigidNoBase); }
+            rk = 0.0f;
+        }
+    }
+    const float keepK = 1.0f - rk;   // the animated head's share
+    const float d[3] = { keepK * (d1[0] + vs[0]) + d2[0], keepK * (d1[1] + vs[1]) + d2[1], keepK * (d1[2] + vs[2]) + d2[2] };
     float loc[3] = {};
     uintptr_t owner = 0;
     // [LOADBEARING: hand-twist view hold] with comfort_body_follows_head=1 the view does not swing with the hands only because of
@@ -33660,17 +33861,73 @@ void EyePointApply(__int64 a1)
     if (ComfortBodyFollowsHead) {
         HtvTick();
         HtvCompute(a1, d1, htvL, htvW);
+        // [LOADBEARING: climb_view_smooth] hand climbing P4 round 10 (run 17 CAM SNAP lines; tester 2026-11-27: "camera snaps are still
+        //      there"): while a hand-climb hang runs, this correction flipped between 0 and ~25 cm in one call (the hands up on the
+        //      ledge make the torso's hand twist come and go) - the snaps left after round 9. The hang's body follows the view, not
+        //      the hands, so there is no hand twist to hold: none is applied while the ledge grab runs in hand mode.
+        if (ClimbHandHanging()) {
+            htvL[0] = htvL[1] = htvL[2] = 0.0f;
+            htvW[0] = htvW[1] = htvW[2] = 0.0f;
+        }
         g_htvCWCur[0] = htvW[0]; g_htvCWCur[1] = htvW[1]; g_htvCWCur[2] = htvW[2];
         g_htvGCur = camyaw::follow::g_htvValid ? camyaw::follow::g_htvGapDeg : 0.0f;
     }
-    // [LOADBEARING: cam_eye_forward] the camera base is moved here (and by cam_eye_arc's term)
-    if (!EpAddLocal(a1, d, loc, &owner, htvL)) { InterlockedIncrement64(&g_epFault); return; }
+    // [LOADBEARING: cam_eye_forward] the camera base is moved here (and by cam_eye_arc's term); + the rigid view's body-local shift
+    const float cl[3] = { htvL[0] + rigL[0], htvL[1] + rigL[1], htvL[2] + rigL[2] };
+    if (!EpAddLocal(a1, d, loc, &owner, cl)) { InterlockedIncrement64(&g_epFault); return; }
     InterlockedIncrement64(&g_epApplied);
+    if (ClimbByHand && standingAccepted && camBase[0] == camBase[0] && g_epV2L) {
+        // climb_view_rigid's standing base: the game's base + the face offset, body-local (only standing calls, never a climb's)
+        float d1L[3] = {};
+        bool ok = false;
+        __try {
+            g_epV2L(reinterpret_cast<const void*>(owner + 24), d1L, d1);
+            ok = d1L[0] == d1L[0] && d1L[1] == d1L[1] && d1L[2] == d1L[2];
+        } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+        if (ok) {
+            for (int i = 0; i < 3; ++i) { g_epRigidL[i] = camBase[i] + d1L[i]; }
+            g_epHaveRigid = true;
+        }
+    }
+    if (ClimbByHand && g_getWorldXform && camOrigin[0] == camOrigin[0]) {
+        // the camera base after (body-local -> world through the owner's transform, rows x[0..3] / x[4..7] / x[8..11])
+        ClimbCamSample cs = {};
+        bool ok = false;
+        __try {
+            const float* x = g_getWorldXform(reinterpret_cast<void*>(owner + 24));
+            const float* p = reinterpret_cast<const float*>(a1 + 4112);
+            if (x) {
+                for (int r = 0; r < 3; ++r) {
+                    cs.camW[r] = x[4 * r] * p[0] + x[4 * r + 1] * p[1] + x[4 * r + 2] * p[2] + x[4 * r + 3];
+                    cs.originW[r] = x[4 * r + 3];
+                    cs.bodyFwd[r] = x[4 * r + 2];
+                }
+                ok = true;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+        if (ok) {
+            XrPosef hp;
+            cs.headYawDeg = NAN;
+            if (GetHeadPose(hp)) {
+                const XrQuaternionf& q = hp.orientation;
+                cs.headYawDeg = atan2f(2.0f * (q.w * q.y + q.x * q.z), 1.0f - 2.0f * (q.x * q.x + q.y * q.y)) * 57.29578f;
+            }
+            for (int i = 0; i < 3; ++i) {
+                cs.baseL[i] = camBase[i]; cs.eyeW[i] = camEye[i];
+                cs.d1[i] = d1[i]; cs.d2[i] = d2[i]; cs.vs[i] = vs[i]; cs.htvW[i] = htvW[i];
+            }
+            ClimbHandCamTrace(cs);
+        }
+    }
     AcquireSRWLockExclusive(&g_epLock);
     // what the HAND ANCHOR gets: + the hand-twist correction (world), so the hands stay on the controllers (§4, R5)
-    g_epD1[0] = d1[0] + htvW[0]; g_epD1[1] = d1[1] + anchorExtraY + htvW[1]; g_epD1[2] = d1[2] + htvW[2];
+    // (+ the rigid view's world shift; the animated head's terms by their remaining share)
+    g_epD1[0] = keepK * (d1[0] + vs[0]) + htvW[0] + rigW[0];
+    g_epD1[1] = keepK * (d1[1] + vs[1]) + anchorExtraY + htvW[1] + rigW[1];
+    g_epD1[2] = keepK * (d1[2] + vs[2]) + htvW[2] + rigW[2];
     g_epD1Ms = GetTickCount64();
-    g_epDW[0] = d[0]; g_epDW[1] = d[1]; g_epDW[2] = d[2];   // what the VIEW got - dlgview.cpp adds it to a dialogue's point
+    // what the VIEW got - dlgview.cpp adds it to a dialogue's point
+    g_epDW[0] = d[0] + rigW[0]; g_epDW[1] = d[1] + rigW[1]; g_epDW[2] = d[2] + rigW[2];
     g_epDWMs = g_epD1Ms;
     g_epOwner = owner;
     g_epLastExtraY = anchorExtraY;

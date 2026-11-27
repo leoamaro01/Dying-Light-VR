@@ -155,6 +155,14 @@ add_library(LibOVRRT64_1 SHARED
     # Roomscale (docs/superpowers/plans/2026-10-27-roomscale-physical-crouch.md Task 7): 7a = the log-only walk-body / map probe,
     # driven from the player-update tail. The decisions are roomscale_logic.h (tests/roomscale_logic_test.cpp).
     ${SRC_ROOT}/ovr2xr/roomscale.cpp
+    # Climbing P0 (docs/design_climbing_overhaul.md §6): the log-only [CLIMBPROBE] of the game's own climbs, driven from the player-update
+    # tail beside roomscale's probe (it borrows roomscale's walk-body resolver). The decisions are climbprobe_logic.h
+    # (tests/climbprobe_logic_test.cpp).
+    ${SRC_ROOT}/ovr2xr/climbprobe.cpp
+    # Hand climbing P1 (docs/design_climbing_overhaul.md §6): a grip on the ledge the game detected starts the game's own ledge grab
+    # (the game's own look + hold-jump start is skipped); both grips open while hanging = the game's drop. The decisions are
+    # climbhand_logic.h (tests/climbhand_logic_test.cpp).
+    ${SRC_ROOT}/ovr2xr/climbhand.cpp
     ${SRC_ROOT}/ovr2xr/physcrouch.cpp
     ${SRC_ROOT}/ovr2xr/breakout.cpp
     ${SRC_ROOT}/ovr2xr/handcoll.cpp

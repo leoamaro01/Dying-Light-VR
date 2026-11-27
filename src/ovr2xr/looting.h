@@ -29,6 +29,9 @@ void LootPoll(bool vrGrip, bool leftOwned, bool rightOwned, bool& withholdL1, bo
 // outWaitS = seconds since the edge. (A lid / chest item under the hand is asked of lidhand by the hips BEFORE this - trace 20261119_1240.)
 holster::Yield LootYieldAt(int hand, bool pressEdge, float* outDist, bool* outLimb, double* outWaitS);
 
+// The hand in game world (looting.cpp HandWorld: camera + yaw-mapped grip offset from the reported head). Pad thread. hand 0 = LEFT,
+// 1 = RIGHT. False when the camera / head / grip is not known this poll. Used by hand climbing (climbhand.cpp).
+bool LootHandWorldPos(int hand, float out[3]);
 // Right grip camouflage block (Jay 10-23 (3), option 1; no key - always on): once per scePad poll, AFTER LootPoll and BEFORE the grip
 // block. withholdR1 comes back true for a right-grip press made while the game's current pick is an infected corpse the R1 slot
 // would camouflage on (INV-616 follow-up); buggy reset / traders / anything else keep R1. Installs the shared GetNearbyTriggers detour.
