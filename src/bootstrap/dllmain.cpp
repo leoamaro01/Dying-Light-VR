@@ -3535,6 +3535,9 @@ void GenerateRenderLoopPak(const char* dlvrDir, const char* gameDir);
 // pakgen.cpp - early_eye_size: hooks the engine's filesystem opens so the first open of DW\dlvr_pp.mth gets THIS launch's
 // per-eye size. Installs nothing unless pakgen's routing wanted it (default ON; dlvr\early_eye_size_off.txt = off).
 void InstallEarlyEyeSizeHook();
+// skillpatch.cpp - grapple_unlock_skill: the game's common_skills.xml with the grappling hook skill unlocked, written to DW\ and
+// opened in its place through the same open hooks. Reads ovr2xr.txt as text; off = nothing read or written.
+void PrepareSkillPatch(const char* gameDir);
 
 BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID)
 {
@@ -3559,6 +3562,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID)
                 char ddir[MAX_PATH];
                 _snprintf_s(ddir, sizeof(ddir), _TRUNCATE, "%s/dlvr", gdir);
                 GenerateRenderLoopPak(ddir, gdir);
+                PrepareSkillPatch(gdir);   // before the hooks: they go in for it too
                 InstallEarlyEyeSizeHook();
             }
         }

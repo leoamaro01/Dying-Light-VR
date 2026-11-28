@@ -737,6 +737,12 @@ static void stale_ledge_detected()
     CHECK(HookMismatch(true, hold, into, true, hookSame, dirSide));
     CHECK(!HookMismatch(true, hold, into, true, hookSame, dirNone));   // no direction known: the distance test only
     CHECK(!HookMismatch(false, hold, into, true, hookLower, dirSame)); // no hand anchored: unknown, not stale
+    // round 14 (run 18 #9): after a re-target the player's ledge is the held one, but the grab's own copy is still the bottom ledge
+    CHECK(HeldStale(true, hold, into, true, hookSame, dirSame, true, hookLower));
+    CHECK(HeldStale(true, hold, into, true, hookLower, dirSame, true, hookSame));    // the player's ledge older: stale as before
+    CHECK(!HeldStale(true, hold, into, true, hookSame, dirSame, true, hookSame));    // both the held one
+    CHECK(!HeldStale(true, hold, into, true, hookSame, dirSame, false, hookLower));  // the copy unread: the player's ledge decides
+    CHECK(!HeldStale(false, hold, into, true, hookLower, dirSame, true, hookLower)); // no hand anchored: unknown, not stale
 }
 
 static void game_moves_from_a_hang()
@@ -770,6 +776,444 @@ static void game_moves_from_a_hang()
     CHECK(GameMoveFromHang(true, false, false, false, false, false, false, 0, 8) == kGmPass);
     CHECK(GameMoveFromHang(true, false, false, false, false, true, false, 1, 16) == kGmPass);
     CHECK(GameMoveFromHang(false, false, false, false, false, true, false, 1, 12) == kGmPass);
+    // round 19 / 20 (climb_skip_reach): the reach-up with nothing above is refused - after the re-target, not before it - whichever
+    // call asks (the stick-up's search, or the hang's input handler the next update)
+    CHECK(GameMoveFromHang(true, true, true, true, false, true, false, 1, 9, true) == kGmRetarget);
+    CHECK(GameMoveFromHang(true, true, true, true, false, true, true, 1, 9, true) == kGmRefuse);
+    CHECK(GameMoveFromHang(true, true, true, true, false, false, false, 1, 5, true) == kGmRefuse);
+    CHECK(GameMoveFromHang(true, true, true, true, false, true, true, 1, 9, false) == kGmPass);   // setting off
+    CHECK(GameMoveFromHang(true, true, true, true, false, true, true, 1, 4, true) == kGmPass);    // a hang jump stays the game's
+}
+
+// P5 round 1: the game's moves from a pole / ladder hang are all refused; the game's own ladder start is refused only from its
+// three sites. (Round 1's centre-line reach, PoleInReach / PoleLedge, was replaced by the surface search in round 2.)
+static void pole_hang_moves_and_ladder_start()
+{
+    // the game's moves from a pole hang: all refused, no re-target
+    CHECK(GameMoveFromHang(true, true, true, true, false, true, false, 1, 8, false, true) == kGmRefuse);
+    CHECK(GameMoveFromHang(true, true, true, true, false, true, false, 1, 12, false, true) == kGmRefuse);
+    CHECK(GameMoveFromHang(true, true, true, true, false, true, false, 1, 9, false, true) == kGmRefuse);
+    CHECK(GameMoveFromHang(true, true, true, true, true, true, false, 1, 8, false, true) == kGmPass);    // ours
+    CHECK(GameMoveFromHang(true, true, true, true, false, true, false, 1, 16, false, true) == kGmPass);  // the drop
+    // the game's ladder start
+    CHECK(RefuseLadderStart(true, true, true, 7, true));
+    CHECK(!RefuseLadderStart(true, true, true, 7, false));   // another caller (a script)
+    CHECK(!RefuseLadderStart(true, false, true, 7, true));   // climb_ladder_by_hand off
+    CHECK(!RefuseLadderStart(true, true, false, 7, true));   // another player
+    CHECK(!RefuseLadderStart(true, true, true, 21, true));   // another group
+    CHECK(!RefuseLadderStart(false, true, true, 7, true));   // hand mode off
+}
+
+// The ladder's use prompt is hidden only while hand mode refuses the game's own ladder start.
+static void ladder_prompt_hidden_in_hand_mode()
+{
+    CHECK(HideLadderPrompt(true, true, true, true));
+    CHECK(!HideLadderPrompt(true, true, true, false));   // any other object keeps its prompt
+    CHECK(!HideLadderPrompt(true, true, false, true));   // the ladder gate is not live: the use key still climbs, keep it
+    CHECK(!HideLadderPrompt(true, false, true, true));   // climb_ladder_by_hand off
+    CHECK(!HideLadderPrompt(false, true, true, true));   // climb_by_hand off
+    CHECK(HideZiplinePrompt(true, true, true, true));
+    CHECK(!HideZiplinePrompt(true, true, true, false));
+    CHECK(!HideZiplinePrompt(true, true, false, true));  // ziplines by hand not live this session: the game's way stays, keep it
+    CHECK(!HideZiplinePrompt(true, false, true, true));  // climb_zipline_by_hand off
+    CHECK(!HideZiplinePrompt(false, true, true, true));
+    CHECK(RefuseZiplineJumpStart(true, true, true, true, 27, true));
+    CHECK(!RefuseZiplineJumpStart(true, true, true, true, 27, false));   // another caller (ours goes through the trampoline anyway)
+    CHECK(!RefuseZiplineJumpStart(true, true, true, false, 27, true));   // another player
+    CHECK(!RefuseZiplineJumpStart(true, true, false, true, 27, true));   // ziplines by hand not live: the jump is the only way
+    CHECK(!RefuseZiplineJumpStart(true, false, true, true, 27, true));   // setting off
+    CHECK(!RefuseZiplineJumpStart(true, true, true, true, 7, true));     // another group
+}
+
+// P6 ziplines: the hand's distance to the grabbable part of a line (the last 4.5 m cut, as the game does) and the start rule.
+static void zipline_grab_near_the_line()
+{
+    ZipLine z;
+    z.a[0] = 0.0f; z.a[1] = 10.0f; z.a[2] = 0.0f;
+    z.b[0] = 20.0f; z.b[1] = 0.0f; z.b[2] = 0.0f;
+    const float l = std::sqrt(20.0f * 20.0f + 10.0f * 10.0f);
+    z.d[0] = 20.0f / l; z.d[1] = -10.0f / l; z.d[2] = 0.0f;
+    float c[3];
+    const float onLine[3] = { 4.0f, 8.0f + 0.2f, 0.0f };   // 0.2 m above the line at x = 4
+    const float d1 = ZipDistance(onLine, z, c);
+    CHECK(d1 > 0.17f && d1 < 0.19f && std::fabs(c[0] - 3.92f) < 0.02f && std::fabs(c[1] - 8.04f) < 0.02f);   // the foot, uphill
+    const float nearEnd[3] = { 19.0f, 0.5f, 0.0f };        // by the far end: inside the cut, so the nearest is 4.5 m back
+    CHECK(ZipDistance(nearEnd, z, c) > 3.0f);
+    const float beforeStart[3] = { -1.0f, 10.0f, 0.0f };   // past the start: clamped to A
+    CHECK(std::fabs(ZipDistance(beforeStart, z, c) - 1.0f) < 1e-4f && c[0] == 0.0f);
+    ZipLine shortLine;
+    shortLine.b[0] = 3.0f; shortLine.d[0] = 1.0f;           // 3 m long: nothing left after the cut
+    CHECK(ZipDistance(onLine, shortLine, c) < 0.0f);
+
+    CHECK(ZipGrabOk(true, true, false, false, 0.2f, 0.35f));
+    CHECK(!ZipGrabOk(true, true, false, false, 0.4f, 0.35f));   // too far
+    CHECK(!ZipGrabOk(true, true, true, false, 0.2f, 0.35f));    // a ledge grab runs
+    CHECK(!ZipGrabOk(true, true, false, true, 0.2f, 0.35f));    // already riding
+    CHECK(!ZipGrabOk(true, false, false, false, 0.2f, 0.35f));  // setting off
+    CHECK(!ZipGrabOk(true, true, false, false, -1.0f, 0.35f));  // no line
+}
+
+// climb_skip_grab_anim / climb_grab_move_mps: a hand grab due to hang skips state 0; a new anchor glides at the set speed until it
+// settles, then the pull's own cap.
+static void grab_skips_the_animation_and_glides()
+{
+    CHECK(SkipGrabAnim(true, true, true, true, true, 0));
+    CHECK(!SkipGrabAnim(false, true, true, true, true, 0));   // setting off
+    CHECK(!SkipGrabAnim(true, true, false, true, true, 0));   // not our grab (the game's own catch)
+    CHECK(!SkipGrabAnim(true, true, true, false, true, 0));   // not due to hang (a low wall: the game climbs over)
+    CHECK(!SkipGrabAnim(true, true, true, true, true, 1));    // already hanging
+    CHECK(!SkipGrabAnim(true, true, true, true, false, 0));   // the grab is not running
+
+    Pull p;
+    const unsigned held = 1u;
+    const bool ok[2] = { true, false };
+    const float lip[2][3] = { { 0.0f, 2.0f, 0.0f }, {} };
+    const bool haveLip[2] = { true, false };
+    float hand[2][3] = { { 0.0f, 1.75f, 0.0f }, {} };   // 0.25 m under its ledge point
+    PullOut o = PullStep(p, held, true, ok, hand, lip, haveLip, 0.4f, 1000);
+    CHECK(o.latched[0] && o.drive);
+    CHECK(GrabGliding(p));
+    CHECK(GrabGlideCap(GrabGliding(p), 1.5f, 4.0f) == 1.5f);
+    CHECK(GrabGlideCap(true, 0.1f, 4.0f) == kGrabGlideMinMps);
+    CHECK(GrabGlideCap(true, 0.0f, 4.0f) == 4.0f);          // no glide speed: the pull's cap
+    CHECK(GrabGlideCap(false, 1.5f, 4.0f) == 4.0f);
+    Hold h;
+    h.drive = true;
+    for (int i = 0; i < 3; ++i) { h.err[i] = o.err[i]; }
+    Motion m;
+    const float feet[3] = { 0.0f, 0.0f, 0.0f };
+    MotionOut mo = MotionStep(m, h, feet, 1000, 0.0f, GrabGlideCap(true, 1.5f, 4.0f));
+    CHECK(mo.send && std::fabs(mo.v[1] - 1.5f) < 1e-4f);   // 0.25 / 0.08 = 3.1 m/s wanted, glided at 1.5
+    hand[0][1] = 1.92f;                                     // the body brought the hand within kSettleM
+    o = PullStep(p, held, true, ok, hand, lip, haveLip, 0.4f, 1200);
+    CHECK(!GrabGliding(p));
+}
+
+// Round 4: room to climb up - a ceiling over the top decides stand / crouch / none; debris under kRoomFromM does not count.
+static void climb_up_room_stand_crouch_none()
+{
+    const float lip[3] = { 0.0f, 1.0f, 0.0f }, into[3] = { 0.0f, 0.0f, 1.0f };   // top at y 1, the spot at z 0.5
+    // a world of horizontal slabs over the spot's area: [bottom, top] heights; a vertical ray hits the first face it meets
+    struct World {
+        float lo, hi;   // one slab (lo = hi = -100: none)
+        bool operator()(const float a[3], const float b[3], float h[3]) const
+        {
+            if (lo < -50.0f) { return false; }
+            const bool up = b[1] > a[1];
+            const float face = up ? lo : hi;   // one-sided: up rays see the underside, down rays the top
+            const bool startInside = a[1] > lo && a[1] < hi;
+            if (startInside) { return false; }
+            const float y0 = up ? a[1] : b[1], y1 = up ? b[1] : a[1];
+            if (face < y0 || face > y1) { return false; }
+            h[0] = a[0]; h[1] = face; h[2] = a[2];
+            return true;
+        }
+    };
+    float hy = 0.0f;
+    CHECK(ClimbUpRoom(lip, into, World{ -100.0f, -100.0f }, &hy) == kRoomStand);
+    CHECK(ClimbUpRoom(lip, into, World{ 3.5f, 3.8f }, &hy) == kRoomStand);     // ceiling 2.5 m over the top
+    CHECK(ClimbUpRoom(lip, into, World{ 2.4f, 2.7f }, &hy) == kRoomCrouch);    // 1.4 m: crouch only
+    CHECK(std::fabs(hy - 1.4f) < 1e-4f);
+    CHECK(ClimbUpRoom(lip, into, World{ 1.9f, 2.2f }, &hy) == kRoomNone);      // 0.9 m: no room
+    CHECK(ClimbUpRoom(lip, into, World{ 1.2f, 1.6f }, &hy) == kRoomNone);      // a slab from 0.2 to 0.6 m (the up ray starts inside it)
+    CHECK(ClimbUpRoom(lip, into, World{ 1.0f, 1.3f }, &hy) == kRoomStand);     // debris 0.3 m tall on the top: ignored
+    const float none[3] = { 0.0f, 0.0f, 0.0f };
+    CHECK(ClimbUpRoom(lip, none, World{ 1.9f, 2.2f }, &hy) == kRoomStand);     // no direction: not tested
+    const float feet[3] = { 0.0f, 1.0f, 0.0f };
+    CHECK(StandRoomAt(feet, World{ 2.4f, 2.7f }) == false);
+    CHECK(StandRoomAt(feet, World{ 3.5f, 3.8f }) == true);
+
+    // the holds' tails after the grab ends
+    CHECK(BodyHoldTail(true, 0, 5000));
+    CHECK(BodyHoldTail(false, 5000, 5400));
+    CHECK(!BodyHoldTail(false, 5000, 5000 + kBodyTailMs));
+    CHECK(!BodyHoldTail(false, 0, 5000));
+    CHECK(!BodyHoldTail(false, 5000, 5100, true));       // round 6: no body tail after a climb-up
+    CHECK(BodyHoldTail(true, 5000, 5100, true));         // (still held while hanging)
+    {
+        ViewTail t;
+        CHECK(ViewHoldTail(t, false, 5000, 5300, 0.40f));       // the head still 40 cm low: the rigid view stays
+        CHECK(!ViewHoldTail(t, false, 5000, 5310, 0.05f));      // back near standing: eases out
+        CHECK(!ViewHoldTail(t, false, 5000, 5400, 0.40f));      // round 6: ended once - the gap growing again does not restart it
+        CHECK(ViewHoldTail(t, true, 0, 6000, 0.40f));           // a new grab
+        CHECK(ViewHoldTail(t, false, 7000, 7100, 0.40f));       // its own tail
+    }
+    {
+        ViewTail t;
+        CHECK(!ViewHoldTail(t, false, 5000, 5000 + kViewTailMaxMs, 0.40f));   // timed out
+    }
+    {
+        ViewTail t;
+        CHECK(ViewHoldTail(t, false, 5000, 5300, NAN));         // unknown: held to the time-out
+    }
+    {   // round 6: settled - run 17:45 climb-up #2: the head rose then stayed ~25 cm short of the remembered point
+        ViewTail t;
+        const float gaps[] = { 0.35f, 0.30f, 0.27f, 0.25f, 0.25f, 0.25f, 0.25f };
+        bool on = true;
+        unsigned long long ms = 5000;
+        int endAt = -1;
+        for (int i = 0; i < 7; ++i) {
+            ms = 5000 + 100ull * static_cast<unsigned long long>(i + 1);
+            on = ViewHoldTail(t, false, 5000, ms, gaps[i]);
+            if (!on && endAt < 0) { endAt = i; }
+        }
+        CHECK(endAt >= 0 && 5000 + 100ull * static_cast<unsigned long long>(endAt + 1) < 5000 + kViewTailMaxMs);
+        CHECK(5000 + 100ull * static_cast<unsigned long long>(endAt + 1) - 5000 >= kViewSettleMinMs);
+    }
+    {   // round 6: the standing eye height refuses dips
+        StandRef s;
+        bool refused = false;
+        CHECK(StandRefStep(s, 1.688f, 1000, &refused) == 1.688f && !refused);
+        CHECK(StandRefStep(s, 1.31f, 2000, &refused) == 1.688f && refused);           // a landing dip
+        CHECK(StandRefStep(s, 1.67f, 2100, &refused) == 1.67f && !refused);           // small changes follow
+        unsigned long long t = 3000;
+        float y = 0.0f;
+        for (; t <= 3000 + kStandLowMs; t += 100) { y = StandRefStep(s, 1.50f, t, &refused); }
+        CHECK(y == 1.50f);                                                            // a lower value held 10 s is taken
+        StandRef g;
+        StandRefStep(g, 1.688f, 0);
+        StandRefStep(g, 1.31f, 1000);
+        CHECK(StandRefStep(g, 1.31f, 1000 + kStandLowMs + 1) == 1.688f);              // two dips far apart are not "held"
+    }
+
+    // the game's zipline try-start is skipped by hand
+    CHECK(SkipZipTry(true, true, true, true));
+    CHECK(!SkipZipTry(true, false, true, true));
+    CHECK(!SkipZipTry(true, true, false, true));
+    CHECK(!SkipZipTry(true, true, true, false));
+}
+
+// P6 round 3: hands on the zipline - anchors ride with the cable, the other hand joins near it, letting go ends the ride.
+static void zipline_hands_on_the_cable()
+{
+    ZipLine line;
+    line.b[0] = 20.0f; line.d[0] = 1.0f;   // a level cable along +x at y 0
+    ZipHold z;
+    const float grab[3] = { 2.0f, 0.0f, 0.0f };
+    ZipHoldStart(z, 1, grab, line);
+    CHECK(z.on && z.has[1] && !z.has[0]);
+    bool grip[2] = { false, true }, edge[2] = { false, false };
+    const bool ok[2] = { true, true };
+    float hand[2][3] = { { 0.0f, -0.5f, 0.0f }, { 2.0f, -0.1f, 0.0f } };
+    const float none[3] = {}, adv[3] = { 0.2f, 0.0f, 0.0f };
+    ZipHoldOut o = ZipHoldStep(z, true, grip, edge, ok, hand, none, 0.3f, 0.45f);
+    CHECK(o.drive && std::fabs(o.err[1] - 0.1f) < 1e-5f && !o.end);   // the body moves the hand up onto the cable
+    o = ZipHoldStep(z, true, grip, edge, ok, hand, adv, 0.3f, 0.45f);  // the ride carried 0.2 m: the anchor went with it
+    CHECK(std::fabs(z.anchor[1][0] - 2.2f) < 1e-5f && std::fabs(o.err[0] - 0.2f) < 1e-5f && !o.end);
+    // the left grip closes 0.2 m under the cable: it joins at the cable's nearest point
+    grip[0] = true; edge[0] = true;
+    hand[0][0] = 1.0f; hand[0][1] = -0.2f;
+    hand[1][0] = 2.2f;
+    o = ZipHoldStep(z, true, grip, edge, ok, hand, none, 0.3f, 0.45f);
+    CHECK(o.joined[0] && z.has[0] && std::fabs(z.anchor[0][0] - 1.0f) < 1e-5f && z.anchor[0][1] == 0.0f);
+    // a grip closing too far from the cable does not join (fresh hold, left hand far)
+    ZipHold z2;
+    ZipHoldStart(z2, 1, grab, line);
+    float far[2][3] = { { 1.0f, -0.6f, 0.0f }, { 2.0f, 0.0f, 0.0f } };
+    o = ZipHoldStep(z2, true, grip, edge, ok, far, none, 0.3f, 0.45f);
+    CHECK(!o.joined[0] && !z2.has[0]);
+    // both open: the ride ends, a let-go (a launch may follow)
+    edge[0] = false;
+    grip[0] = grip[1] = false;
+    o = ZipHoldStep(z, true, grip, edge, ok, hand, none, 0.3f, 0.45f);
+    CHECK(o.end && o.endOpened && o.released[0] && o.released[1] && !z.on);
+    // a slip: the hand pulled 0.6 m off its anchor with the grip closed
+    ZipHoldStart(z, 0, grab, line);
+    grip[0] = true;
+    float slip[2][3] = { { 2.0f, -0.6f, 0.0f }, {} };
+    o = ZipHoldStep(z, true, grip, edge, ok, slip, none, 0.3f, 0.45f);
+    CHECK(o.end && !o.endOpened && o.slipped[0]);
+    // the game ends the ride (the line's end): the hold ends with no request
+    ZipHoldStart(z, 0, grab, line);
+    o = ZipHoldStep(z, false, grip, edge, ok, hand, none, 0.3f, 0.45f);
+    CHECK(o.gameEnded && !o.end && !z.on);
+}
+
+// P6 X1: a launch caught by a new grab pays once, inside the window, only when the feet travelled kLaunchXpMinM.
+static void launch_catch_pays_the_jump_xp()
+{
+    LaunchXp x;
+    const float f0[3] = { 0.0f, 0.0f, 0.0f }, up[3] = { 0.3f, 1.2f, 0.4f }, near[3] = { 0.2f, 0.5f, 0.0f };
+    float d = 0.0f;
+    CHECK(!LaunchCatchPays(x, 1000, up, &d) && d < 0.0f);   // no launch armed
+    ArmLaunchXp(x, 1000, f0, true);
+    CHECK(LaunchCatchPays(x, 1800, up, &d) && d > 1.2f && d < 1.4f);
+    CHECK(!LaunchCatchPays(x, 1900, up, &d) && d < 0.0f);   // one launch pays once
+    ArmLaunchXp(x, 1000, f0, true);
+    CHECK(!LaunchCatchPays(x, 1500, near, &d) && d > 0.5f && d < 0.6f);   // back onto (nearly) the same hold
+    ArmLaunchXp(x, 1000, f0, true);
+    CHECK(!LaunchCatchPays(x, 1000 + kLaunchXpWindowMs + 1, up, &d) && d < 0.0f);   // too long after the launch
+    ArmLaunchXp(x, 1000, f0, false);
+    CHECK(!LaunchCatchPays(x, 1200, up, &d));   // no feet at the launch: nothing to measure from
+    CHECK(kXpTypeJump180 == 5);
+}
+
+// P5 slide: a light grip on a pole slides down until the bottom (extents) or the feet stall.
+static void pole_slide_light_grip()
+{
+    const float light[2] = { 0.6f, 0.7f }, mixed[2] = { 0.6f, 1.0f }, full[2] = { 1.0f, 1.0f };
+    CHECK(SlideGrip(2.5f, true, true, 3u, light, 0.85f));
+    CHECK(!SlideGrip(2.5f, true, true, 3u, mixed, 0.85f));   // one hand squeezes fully: it holds
+    CHECK(SlideGrip(2.5f, true, true, 1u, mixed, 0.85f));    // ...unless that hand is not holding
+    CHECK(!SlideGrip(2.5f, true, true, 3u, full, 0.85f));
+    CHECK(!SlideGrip(2.5f, false, true, 3u, light, 0.85f));  // a ledge: no slide
+    CHECK(!SlideGrip(0.0f, true, true, 3u, light, 0.85f));   // off
+    CHECK(!SlideGrip(2.5f, true, false, 3u, light, 0.85f));  // not a hold state
+    CHECK(!SlideGrip(2.5f, true, true, 0u, light, 0.85f));   // no hand holds
+
+    Slide s;
+    float d = 0.0f;
+    CHECK(SlideStep(s, true, 1000, 2.5f, 4.0f, true, 5.0f, true, 0.0f, &d) == kSlideStart && d == 0.0f);
+    CHECK(SlideStep(s, true, 1020, 2.5f, 4.0f, true, 4.95f, true, 0.0f, &d) == kSlideMove && std::fabs(d - 0.05f) < 1e-4f);
+    CHECK(SlideStep(s, true, 1200, 2.5f, 4.0f, true, 4.5f, true, 0.0f, &d) == kSlideMove && std::fabs(d - 0.125f) < 1e-4f);   // dt capped
+    CHECK(SlideStep(s, true, 1220, 9.0f, 4.0f, true, 4.4f, true, 0.0f, &d) == kSlideMove && std::fabs(d - 0.064f) < 1e-4f);   // speed cap 3.2
+    CHECK(SlideStep(s, true, 1240, 2.5f, 4.0f, true, 0.02f, true, 0.0f, &d) == kSlideBottom && !s.on);   // at the bottom
+    CHECK(SlideStep(s, false, 1260, 2.5f, 4.0f, true, 0.02f, true, 0.0f, &d) == kSlideNone);
+
+    // near the bottom: never below it
+    s = Slide();
+    SlideStep(s, true, 2000, 2.5f, 4.0f, true, 0.08f, true, 0.0f, &d);
+    CHECK(SlideStep(s, true, 2040, 2.5f, 4.0f, true, 0.08f, true, 0.0f, &d) == kSlideMove && std::fabs(d - 0.08f) < 1e-4f);
+    // the grip tightens: stop
+    CHECK(SlideStep(s, false, 2060, 2.5f, 4.0f, true, 0.07f, true, 0.0f, &d) == kSlideStop && d == 0.0f);
+
+    // no bottom known: the feet stalling ends it
+    s = Slide();
+    SlideStep(s, true, 3000, 2.5f, 4.0f, true, 2.0f, false, 0.0f, &d);
+    CHECK(SlideStep(s, true, 3020, 2.5f, 4.0f, true, 1.9f, false, 0.0f, &d) == kSlideMove);
+    CHECK(SlideStep(s, true, 3200, 2.5f, 4.0f, true, 1.895f, false, 0.0f, &d) == kSlideMove);
+    CHECK(SlideStep(s, true, 3280, 2.5f, 4.0f, true, 1.89f, false, 0.0f, &d) == kSlideBottom);
+}
+
+// The jump button from a hang: up when looking at the wall / pole, a push-off along the look otherwise (yaw only).
+static void jump_button_aims_by_look()
+{
+    CHECK(JumpButtonAsk(true, true, 1, 9, true, false));
+    CHECK(JumpButtonAsk(true, true, 1, 4, true, false));
+    CHECK(!JumpButtonAsk(true, true, 1, 9, true, true));    // the stick pushed up: the stick's reach, not a jump
+    CHECK(!JumpButtonAsk(true, true, 1, 9, false, false));  // the stick-up search's own call
+    CHECK(!JumpButtonAsk(true, true, 8, 9, true, false));   // not from a hold
+    CHECK(!JumpButtonAsk(true, false, 1, 9, true, false));  // setting off
+    CHECK(!JumpButtonAsk(false, true, 1, 9, true, false));  // hand mode off
+    CHECK(!JumpButtonAsk(true, true, 1, 8, true, false));   // the climb-up is no jump
+
+    const float into[3] = { 0.0f, 0.0f, -1.0f };
+    float v[3], yaw = 0.0f;
+    const float atWall[3] = { 0.3f, 0.9f, -1.0f };            // looking up at the wall, a little to the side
+    CHECK(!LookJumpVelocity(atWall, true, into, 45.0f, v, &yaw) && yaw > 16.0f && yaw < 17.5f);
+    CHECK(v[0] == 0.0f && v[2] == 0.0f && std::fabs(v[1] - kLaunchMaxUpMps) < 1e-4f);
+    const float back[3] = { 0.0f, 0.8f, 1.0f };               // looking up but away from the wall: a push-off backward
+    CHECK(LookJumpVelocity(back, true, into, 45.0f, v, &yaw) && yaw > 179.0f);
+    CHECK(std::fabs(v[2] - kLaunchMaxSideMps) < 1e-4f && std::fabs(v[0]) < 1e-4f && std::fabs(v[1] - kLaunchMaxUpMps) < 1e-4f);
+    const float side[3] = { 1.0f, 0.0f, 0.0f };               // along the wall: sideways
+    CHECK(LookJumpVelocity(side, true, into, 45.0f, v, &yaw) && std::fabs(yaw - 90.0f) < 0.1f);
+    CHECK(std::fabs(v[0] - kLaunchMaxSideMps) < 1e-4f);
+    CHECK(!LookJumpVelocity(side, false, into, 45.0f, v, &yaw) && yaw < 0.0f);   // no look: up
+    const float up[3] = { 0.0f, 1.0f, 0.0f };                 // straight up: no horizontal look -> up
+    CHECK(!LookJumpVelocity(up, true, into, 45.0f, v, &yaw) && yaw < 0.0f);
+
+    {   // round 21: on a pole the direction is the feet -> where the hands hold now
+        const float feetJ[3] = { 0.0f, 0.0f, 0.0f }, holdJ[3] = { 0.0f, 1.5f, 0.4f }, wallJ[3] = { 1.0f, 0.0f, 0.0f };
+        float in3[3];
+        CHECK(JumpInto(true, feetJ, true, holdJ, true, wallJ, true, in3) == 2 && std::fabs(in3[2] - 1.0f) < 1e-4f);
+        CHECK(JumpInto(false, feetJ, true, holdJ, true, wallJ, true, in3) == 1 && in3[0] == 1.0f);   // a ledge: the wall's
+        const float overJ[3] = { 0.01f, 1.5f, 0.02f };                                               // the hold right over the feet
+        CHECK(JumpInto(true, feetJ, true, overJ, true, wallJ, true, in3) == 1 && in3[0] == 1.0f);
+        CHECK(JumpInto(true, feetJ, true, holdJ, false, wallJ, false, in3) == 0);
+        // looking away from the pole (behind the hands): a push-off, whatever the grab's direction was
+        const float away[3] = { 0.0f, 0.0f, -1.0f };
+        JumpInto(true, feetJ, true, holdJ, true, wallJ, true, in3);
+        CHECK(LookJumpVelocity(away, true, in3, 45.0f, v, &yaw) && yaw > 179.0f);
+    }
+
+    float f[3];
+    const float ident[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    HeadForwardGame(ident, 0.0f, false, f);
+    CHECK(std::fabs(f[0]) < 1e-5f && std::fabs(f[1]) < 1e-5f && std::fabs(f[2] + 1.0f) < 1e-5f);
+    // a head turned 90 deg left about +Y (OpenXR): forward -X; the game yaw 0 keeps it
+    const float s2 = std::sqrt(0.5f);
+    const float left[4] = { 0.0f, s2, 0.0f, s2 };
+    HeadForwardGame(left, 0.0f, false, f);
+    CHECK(std::fabs(f[0] + 1.0f) < 1e-5f && std::fabs(f[2]) < 1e-5f);
+    // the same rotation as the hands' offsets: (x c + z s, y, -x s + z c) with rel = 90 deg maps forward (0,0,-1) to (-1,0,0)
+    HeadForwardGame(ident, 1.5707963f, false, f);
+    CHECK(std::fabs(f[0] + 1.0f) < 1e-5f && std::fabs(f[2]) < 1e-5f);
+    HeadForwardGame(ident, 1.5707963f, true, f);
+    CHECK(std::fabs(f[0] - 1.0f) < 1e-5f && std::fabs(f[2]) < 1e-5f);
+}
+
+// P5 round 2: the grab point is on the climbable's own surface, wherever the hand is next to it - here a 1 m wide box (a ladder
+// that is no thin pole) with its face at x = 1.0; other geometry (not the climbable) never counts.
+static void pole_grab_on_its_surface()
+{
+    bool lastTarget = false;
+    // the climbable: the box x 1.0..1.6, y 0..5, z -0.5..0.5; a wall (not it): z >= 0.8
+    auto cast = [&](const float a[3], const float b[3], float hit[3]) {
+        lastTarget = false;
+        float tBest = 2.0f;
+        bool target = false;
+        const float dx = b[0] - a[0], dz = b[2] - a[2], dy = b[1] - a[1];
+        if (dx != 0.0f) {   // the box's near face x = 1.0, entered moving +x
+            const float t = (1.0f - a[0]) / dx;
+            const float y = a[1] + dy * t, z = a[2] + dz * t;
+            if (dx > 0.0f && t >= 0.0f && t <= 1.0f && y >= 0.0f && y <= 5.0f && z >= -0.5f && z <= 0.5f && t < tBest) {
+                tBest = t; target = true;
+            }
+        }
+        if (dz != 0.0f) {   // the wall z = 0.8, entered moving +z
+            const float t = (0.8f - a[2]) / dz;
+            if (dz > 0.0f && t >= 0.0f && t <= 1.0f && t < tBest) { tBest = t; target = false; }
+        }
+        if (tBest > 1.0f) { return false; }
+        hit[0] = a[0] + dx * tBest; hit[1] = a[1] + dy * tBest; hit[2] = a[2] + dz * tBest;
+        lastTarget = target;
+        return true;
+    };
+    auto isTarget = [&]() { return lastTarget; };
+    float hit[3] = {}, d = 0.0f;
+    int rays = 0;
+    const float nearSide[3] = { 0.8f, 2.0f, 0.3f };   // 0.2 m from its face, off its centre line
+    CHECK(PoleSurfaceFind(nearSide, 0.30f, cast, isTarget, hit, &d, &rays));
+    CHECK(std::fabs(hit[0] - 1.0f) < 1e-4f && std::fabs(hit[2] - 0.3f) < 1e-4f && d > 0.199f && d < 0.201f && rays == kSurfDirs);
+    const float inside[3] = { 1.1f, 2.0f, 0.0f };     // pushed 10 cm into it: the face behind the hand
+    CHECK(PoleSurfaceFind(inside, 0.30f, cast, isTarget, hit, &d, &rays) && std::fabs(hit[0] - 1.0f) < 1e-4f);
+    const float far[3] = { 0.5f, 2.0f, 0.0f };        // 0.5 m away
+    CHECK(!PoleSurfaceFind(far, 0.30f, cast, isTarget, hit, &d, &rays) && d < 0.0f);
+    const float byWall[3] = { -1.0f, 2.0f, 0.65f };   // only the wall in reach: not the climbable
+    CHECK(!PoleSurfaceFind(byWall, 0.30f, cast, isTarget, hit, &d, &rays));
+    // the ledge made there: from the feet to the point
+    const float feet[3] = { 0.0f, 0.0f, 0.3f }, fwd[3] = { 1.0f, 0.0f, 0.0f };
+    Ledge L;
+    const float pt[3] = { 1.0f, 2.0f, 0.3f };
+    CHECK(PoleLedgeAt(pt, feet, fwd, &L) && L.into[0] > 0.999f && L.lip[1] == 2.0f && L.lip[2] == 0.3f);
+    const float under[3] = { 1.0f, 0.0f, 0.3f };
+    CHECK(PoleLedgeAt(pt, under, fwd, &L) && L.into[0] > 0.999f);   // feet under the point: its forward vector
+    CHECK(std::fabs(L.a[2] - L.b[2]) > 0.49f && L.a[0] == L.b[0]);   // the edge runs across, 0.5 m
+    int best = -1;
+    CHECK(PoleSurfaceFind(nearSide, 0.30f, cast, isTarget, hit, &d, &rays, &best) && best == 0);   // the +x ray
+}
+
+// Round 19: a game shimmy carries the body; when the hang resumes, the shift is reported once (the held ledge points follow it).
+static void game_move_shift_follows_the_shimmy()
+{
+    MoveShift m;
+    float sh[3];
+    const float a[3] = { 10.0f, 5.0f, 20.0f }, mid[3] = { 10.3f, 5.1f, 20.0f }, b[3] = { 10.6f, 5.0f, 20.05f };
+    CHECK(!MoveShiftStep(m, true, 1, a, true, sh));         // hanging
+    CHECK(!MoveShiftStep(m, true, 12, mid, true, sh));      // the game's shimmy carries the body
+    CHECK(MoveShiftStep(m, true, 1, b, true, sh));          // back in the hang: the shift from where the shimmy began
+    CHECK(sh[0] > 0.599f && sh[0] < 0.601f && sh[1] == 0.0f && sh[2] > 0.049f && sh[2] < 0.051f);
+    CHECK(!MoveShiftStep(m, true, 1, b, true, sh));         // once
+    // 14 (a blocked shimmy) is a hold state: nothing away
+    CHECK(!MoveShiftStep(m, true, 14, b, true, sh));
+    CHECK(!MoveShiftStep(m, true, 1, b, true, sh));
+    // the grab itself (0) and a climb-up (8) never report a shift
+    MoveShift g;
+    CHECK(!MoveShiftStep(g, true, 0, a, true, sh));
+    CHECK(!MoveShiftStep(g, true, 1, b, true, sh));         // the hang begins after the grab: no shift
+    CHECK(!MoveShiftStep(g, true, 8, mid, true, sh));
+    CHECK(!MoveShiftStep(g, false, -1, mid, true, sh));
+    CHECK(!g.haveHold && !g.away);                          // the grab ended: reset
 }
 
 static void ledge_held_is_the_last_grabbed()
@@ -891,6 +1335,116 @@ static void stick_climb_up_refused_only_when_off()
     CHECK(!RefuseClimbUp(true, false, false, false, 0, 8));  // the grab's own end (0 -> 8, a low ledge) is not a climb from a hang
     CHECK(!RefuseClimbUp(false, false, false, false, 1, 8)); // hand mode off
     CHECK(!RefuseClimbUp(true, false, false, false, 1, 16));
+}
+
+// Round 13: a stick held forward from the run-up into the grab is not a push to climb up; a fresh push after the grab is.
+static void stick_held_from_the_run_up_does_not_climb()
+{
+    CHECK(!StickClimbPush(1000, 990, 200, 500));    // pushed at 200, the grab at 500, still held: the run-up's push
+    CHECK(StickClimbPush(1000, 990, 700, 500));     // let back and pushed again at 700: counts
+    CHECK(StickClimbPush(1000, 990, 500, 500));     // pushed on the grab's own poll: counts
+    CHECK(!StickClimbPush(1000, 800, 700, 500));    // the last forward reading is older than kStickFreshMs
+    CHECK(!StickClimbPush(1000, 0, 0, 500));        // never pushed
+    CHECK(StickClimbPush(1000, 990, 200, 0));       // the grab's start unknown: the push counts (never blocks)
+    CHECK(!StickClimbPush(980, 990, 700, 500));     // a reading newer than now (thread skew) is not trusted
+}
+
+// Round 15: the climb-up's lift over the ledge top lowers the view / root by exactly that, never below the top, never past the cap.
+static void climb_up_lift_over_the_top()
+{
+    CHECK(OverLedgeM(true, 146.83f + 0.5f, 146.83f) > 0.499f && OverLedgeM(true, 146.83f + 0.5f, 146.83f) < 0.501f);
+    CHECK(OverLedgeM(true, 145.2f, 146.83f) == 0.0f);          // still below the top (hanging / pulling up): nothing
+    CHECK(OverLedgeM(false, 147.5f, 146.83f) == 0.0f);         // not climbing up: nothing
+    CHECK(OverLedgeM(true, 150.0f, 146.83f) == kOverLedgeMaxM); // capped
+    CHECK(OverLedgeM(true, 147.0f, NAN) == 0.0f);              // the ledge unread
+}
+
+// Round 16: the lift is taken off until the body is down (a tail after the climb-up state), only for a climb-up from a hang.
+static void climb_up_lift_tail_after_the_state()
+{
+    OverLedgeState s;
+    int ev = 0;
+    const float top = 100.0f;
+    CHECK(OverLedgeStep(s, true, 1, 98.4f, top, 0, &ev) == 0.0f);            // hanging
+    CHECK(OverLedgeStep(s, true, 8, 99.0f, top, 10, &ev) == 0.0f && ev == kOlStarted);
+    const float up = OverLedgeStep(s, true, 8, 100.5f, top, 500, &ev);       // lifted 0.5 over the top
+    CHECK(up > 0.499f && up < 0.501f);
+    const float after = OverLedgeStep(s, false, -1, 100.4f, top, 900, &ev);  // the grab ended, the body still 0.4 up
+    CHECK(after > 0.399f && after < 0.401f && ev == kOlClimbEnded);
+    CHECK(OverLedgeStep(s, false, -1, 100.45f, top, 950, &ev) < 0.401f);     // never grows again in the tail
+    CHECK(OverLedgeStep(s, false, -1, 100.0f, top, 1100, &ev) == 0.0f && ev == kOlTailEnded);   // down: done
+    // the game's own climb-over straight from a grab (0 > 8): not a climb-up from a hang, nothing lowered
+    OverLedgeState g;
+    OverLedgeStep(g, true, 0, 99.0f, top, 0, &ev);
+    CHECK(OverLedgeStep(g, true, 8, 101.0f, top, 10, &ev) == 0.0f && ev == kOlNone);
+    // a tail that keeps coming down slowly ends at kOverLedgeTailMs, and fades out from there (no jump)
+    OverLedgeState t;
+    OverLedgeStep(t, true, 1, 98.0f, top, 0, &ev);
+    OverLedgeStep(t, true, 8, 100.6f, top, 10, &ev);
+    OverLedgeStep(t, false, -1, 100.6f, top, 20, &ev);
+    unsigned long long ms = 20;
+    float y = 100.6f;
+    while (ms < 20 + kOverLedgeTailMs) { ms += 100; y -= 0.02f; OverLedgeStep(t, false, -1, y, top, ms, &ev); }
+    CHECK(t.fading && !t.settled);
+    const float f0 = t.fadeFromM;
+    const float half = OverLedgeStep(t, false, -1, y, top, t.fadeStartMs + kOverLedgeFadeMs / 2, &ev);
+    CHECK(half > f0 * 0.45f && half < f0 * 0.55f && ev == kOlNone);
+    CHECK(OverLedgeStep(t, false, -1, y, top, t.fadeStartMs + kOverLedgeFadeMs, &ev) == 0.0f && ev == kOlTailEnded);
+}
+
+// Round 17 (run 21: "sometimes too low"): a body that stands on a floor higher than the ledge point stops coming down - the tail
+// eases out from kOverLedgeSettleMs after it stopped, not at the 1.5 s time-out with a jump.
+static void climb_up_lift_eases_out_when_the_body_settles()
+{
+    OverLedgeState s;
+    int ev = 0;
+    const float top = 100.0f;
+    OverLedgeStep(s, true, 1, 98.4f, top, 0, &ev);
+    OverLedgeStep(s, true, 8, 100.5f, top, 10, &ev);
+    OverLedgeStep(s, false, -1, 100.30f, top, 100, &ev);                     // ended 30 cm up, coming down
+    OverLedgeStep(s, false, -1, 100.10f, top, 150, &ev);
+    float m = OverLedgeStep(s, false, -1, 100.09f, top, 200, &ev);           // stops 9 cm over the ledge point (a higher floor)
+    CHECK(m > 0.089f && m < 0.101f && !s.fading);
+    OverLedgeStep(s, false, -1, 100.09f, top, 250, &ev);
+    CHECK(!s.fading);                                                         // still inside kOverLedgeSettleMs of the last descent
+    m = OverLedgeStep(s, false, -1, 100.09f, top, 150 + kOverLedgeSettleMs, &ev);
+    CHECK(s.fading && s.settled && m > 0.089f);                               // settled: the fade starts from what was left
+    m = OverLedgeStep(s, false, -1, 100.09f, top, 150 + kOverLedgeSettleMs + kOverLedgeFadeMs, &ev);
+    CHECK(m == 0.0f && ev == kOlTailEnded);
+    CHECK(150 + kOverLedgeSettleMs + kOverLedgeFadeMs < 100 + kOverLedgeTailMs);   // well before the time-out
+}
+
+// Round 18: the climb-up from a hang ends once the feet stand on the top past the lip (run 21 #11's samples: up and 0.5 m in ~1.1 s
+// into the game's 2.24 s).
+static void fast_climb_up_ends_on_the_top_past_the_lip()
+{
+    const float lip[3] = { 320.03f, 141.78f, 339.77f };
+    const float into[3] = { 0.37f, 0.0f, -0.93f };
+    const float hanging[3] = { 320.015f, 140.05f, 340.096f };   // below, outside
+    const float rising[3] = { 320.066f, 141.25f, 339.52f };     // past the lip, still below the top
+    const float upNotIn[3] = { 320.03f, 141.90f, 339.70f };     // over the top, only ~6 cm in
+    const float onTop[3] = { 320.10f, 141.85f, 339.33f };       // over the top, ~44 cm in
+    CHECK(!FastClimbUpDone(true, true, 8, hanging, lip, into));
+    CHECK(!FastClimbUpDone(true, true, 8, rising, lip, into));
+    CHECK(!FastClimbUpDone(true, true, 8, upNotIn, lip, into));
+    CHECK(FastClimbUpDone(true, true, 8, onTop, lip, into));
+    CHECK(!FastClimbUpDone(false, true, 8, onTop, lip, into));   // climb_fast_climb_up off
+    CHECK(!FastClimbUpDone(true, false, 8, onTop, lip, into));   // a climb-over straight from a grab
+    CHECK(!FastClimbUpDone(true, true, 10, onTop, lip, into));   // already ending
+    const float none[3] = { 0.0f, 0.0f, 0.0f };
+    CHECK(!FastClimbUpDone(true, true, 8, onTop, lip, none));    // no inward direction
+}
+
+// Round 16: climb_air_control_pct is AirControlPush's k - 10 % closes a tenth of the gap along the stick per update.
+static void air_control_percent_closes_that_share_of_the_gap()
+{
+    const float h[2] = { 0.0f, 2.0f };           // 2 m/s along +z already
+    const float w[3] = { 0.0f, 0.0f, 6.0f };     // the stick wants 6 m/s along +z: gap 4
+    float out[3] = {};
+    AirControlPush(h, w, 1.0f, out, 0.10f);
+    CHECK(out[2] > 2.399f && out[2] < 2.401f);   // + 10 % of 4
+    AirControlPush(h, w, 1.0f, out, 0.0f);
+    CHECK(out[2] == 2.0f);                       // 0 % = momentum only
 }
 
 static void low_walls_switch()
@@ -1322,11 +1876,28 @@ int main()
     game_moves_from_a_hang();
     view_smooth_glides_and_lets_go();
     ledge_held_is_the_last_grabbed();
+    game_move_shift_follows_the_shimmy();
+    pole_hang_moves_and_ladder_start();
+    pole_grab_on_its_surface();
+    launch_catch_pays_the_jump_xp();
+    ladder_prompt_hidden_in_hand_mode();
+    zipline_grab_near_the_line();
+    zipline_hands_on_the_cable();
+    grab_skips_the_animation_and_glides();
+    climb_up_room_stand_crouch_none();
+    jump_button_aims_by_look();
+    pole_slide_light_grip();
     pin_shift_draws_the_hand_on_its_point();
     hands_mode_follows_and_records();
     auto_climb_up_asks_the_game();
     fast_pull_through_the_height_does_not_climb_up();
     stick_climb_up_refused_only_when_off();
+    stick_held_from_the_run_up_does_not_climb();
+    climb_up_lift_over_the_top();
+    climb_up_lift_tail_after_the_state();
+    climb_up_lift_eases_out_when_the_body_settles();
+    fast_climb_up_ends_on_the_top_past_the_lip();
+    air_control_percent_closes_that_share_of_the_gap();
     low_walls_switch();
     up_assist_halves_the_angle();
     mantle_not_due_while_hanging_low_or_off();

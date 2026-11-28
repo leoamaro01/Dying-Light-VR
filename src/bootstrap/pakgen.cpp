@@ -2021,29 +2021,53 @@ void NoteOpen(const char* via, const char* name)
          k == kOpenLogMax ? " (last one logged)" : "");
 }
 
+// grapple_unlock_skill (2026-11-28) shares these hooks: they are installed when either wants them, and g_earlyActive says whether
+// early_eye_size does (off = its open log and rewrite never run - exactly as before when the hooks were not installed).
+volatile LONG g_earlyActive = 0;
+
 void EarlyCheck(const char* via, const char* name)
 {
+    if (!g_earlyActive) { return; }
     NoteOpen(via, name);
     if (g_earlyDone || !IsPpMthName(name)) { return; }
     const char* args[2] = { via, name };
     InitOnceExecuteOnce(&g_earlyOnce, EarlyOnceFn, const_cast<char**>(args), nullptr);   // a second opener waits for it
 }
 
+}  // namespace
+// skillpatch.cpp: the name to open instead (nullptr = as asked), and the fallback's log.
+const char* SkillPatchRedirect(const char* name, const char* via);
+void SkillPatchRedirectFailed(const char* name, const char* via);
+bool SkillPatchWanted();
+namespace {
+
 bool HookFileOpen(void* self, const char* name, int mode, int flags)
 {
     EarlyCheck("fs::file::open", name);
+    if (const char* alt = SkillPatchRedirect(name, "fs::file::open")) {
+        if (g_realFileOpen(self, alt, mode, flags)) { return true; }
+        SkillPatchRedirectFailed(name, "fs::file::open");
+    }
     return g_realFileOpen(self, name, mode, flags);
 }
 
 bool HookCachedOpen(void* self, const char* name, int mode, int flags)
 {
     EarlyCheck("fs::cachedrdfile::open", name);
+    if (const char* alt = SkillPatchRedirect(name, "fs::cachedrdfile::open")) {
+        if (g_realCachedOpen(self, alt, mode, flags)) { return true; }
+        SkillPatchRedirectFailed(name, "fs::cachedrdfile::open");
+    }
     return g_realCachedOpen(self, name, mode, flags);
 }
 
 void* HookFsOpen(const char* name, int mode, int flags)
 {
     EarlyCheck("fs::open", name);
+    if (const char* alt = SkillPatchRedirect(name, "fs::open")) {
+        if (void* f = g_realFsOpen(alt, mode, flags)) { return f; }
+        SkillPatchRedirectFailed(name, "fs::open");
+    }
     return g_realFsOpen(name, mode, flags);
 }
 
@@ -2053,13 +2077,18 @@ void* HookFsOpen(const char* name, int mode, int flags)
 // completed (its length is what the rewrite must match).
 void InstallEarlyEyeSizeHook()
 {
-    if (!g_earlyWanted) { return; }   // the reason is the routing's "same-launch eye size" line
-    if (!g_earlyMthLen) {
+    // grapple_unlock_skill (skillpatch.cpp) needs the same open hooks: installed for either; early_eye_size's own work runs only
+    // when it is wanted AND its attach write completed (g_earlyActive).
+    const bool skill = SkillPatchWanted();
+    if (!g_earlyWanted && !skill) { return; }   // the reason is the routing's "same-launch eye size" line
+    if (g_earlyWanted && !g_earlyMthLen) {
         // [PROBE: PAKGEN] gate=early_eye_size (default ON; dlvr\early_eye_size_off.txt = off)  site=FLAT  log-only=yes
         PLOG("[PAKGEN] early_eye_size: *** hook NOT installed *** - the attach write of dlvr_pp.mth did not complete (see its "
-             "line above), so there is no file of known length to rewrite. This launch keeps the attach decision.");
-        return;
+             "line above), so there is no file of known length to rewrite. This launch keeps the attach decision.%s",
+             skill ? " (The hooks still go in for grapple_unlock_skill.)" : "");
+        if (!skill) { return; }
     }
+    InterlockedExchange(&g_earlyActive, g_earlyWanted && g_earlyMthLen ? 1 : 0);
     HMODULE fsd = GetModuleHandleA("filesystem_x64_rwdi.dll");
     if (fsd) {
         g_realFileOpen   = reinterpret_cast<PFN_FileOpen>(reinterpret_cast<void*>(GetProcAddress(fsd, kImpFileOpen)));
@@ -2097,9 +2126,10 @@ void InstallEarlyEyeSizeHook()
         where += std::string(" ") + m + "(" + (got.empty() ? "none" : got) + ")";
     }
     // [PROBE: PAKGEN] gate=early_eye_size (default ON; dlvr\early_eye_size_off.txt = off)  site=FLAT  log-only=yes
-    PLOG("[PAKGEN] early_eye_size: hook %s - %d IAT slot(s):%s. The attach file is %zu bytes; the first open of %s fetches "
-         "this launch's size.", total ? "INSTALLED" : "*** NOT INSTALLED (no slot found) ***", total, where.c_str(),
-         g_earlyMthLen, kPpMthName);
+    PLOG("[PAKGEN] early_eye_size: hook %s - %d IAT slot(s):%s. %s%s", total ? "INSTALLED" : "*** NOT INSTALLED (no slot found) ***",
+         total, where.c_str(), g_earlyActive ? "The first open of dlvr_pp.mth fetches this launch's size." :
+         "early_eye_size itself is OFF this launch (the hooks pass its file through).",
+         skill ? " grapple_unlock_skill's redirect of common_skills.xml rides on them." : "");
 }
 
 // v2: rd3d11_x64_rwdi.dll is loaded after attach, so its own fs::file::open import (INV-518) was the one slot run 1 did not cover.

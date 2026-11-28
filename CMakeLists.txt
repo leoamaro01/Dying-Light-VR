@@ -59,6 +59,10 @@ add_library(xinput1_3 SHARED
     ${SRC_ROOT}/bootstrap/dlssflat.cpp
     ${SRC_ROOT}/bootstrap/shaderbin.cpp
     ${SRC_ROOT}/bootstrap/pakgen.cpp
+    # grapple_unlock_skill (design §8.21): the game's own common_skills.xml, read from its pak (launcher_unzip.h + puff), patched
+    # (skillpatch_logic.h, tests/skillpatch_logic_test.cpp) and opened in its place through pakgen's open hooks.
+    ${SRC_ROOT}/bootstrap/skillpatch.cpp
+    ${SRC_ROOT}/third_party/puff/puff.c
     # FSR 3.1 / 4 through a D3D11<->D3D12 interop (docs/PROPOSAL-FSR-INTEROP-2026-09-26.md).
     # d3d12.dll and the FFX loader are LoadLibrary'd, never linked, so nothing
     # is added to target_link_libraries for it.
@@ -88,7 +92,7 @@ set(DLVR_NGX_SDK "${CMAKE_CURRENT_SOURCE_DIR}/../DLSS_SDK" CACHE PATH "NVIDIA DL
 # The AMD FidelityFX SDK 2.3.0 (FSR 3.1.5 + FSR 4.1.1), headers only at build
 # time; the signed DLLs are deployed beside xinput1_3.dll below.
 set(DLVR_FFX_SDK "${CMAKE_CURRENT_SOURCE_DIR}/../FSR_SDK/v2.3.0/Kits/FidelityFX" CACHE PATH "AMD FidelityFX SDK root")
-target_include_directories(xinput1_3 PRIVATE ${SRC_ROOT}/common "${DLVR_NGX_SDK}/include"
+target_include_directories(xinput1_3 PRIVATE ${SRC_ROOT}/common ${SRC_ROOT}/third_party/puff "${DLVR_NGX_SDK}/include"
                            "${DLVR_NGX_SDK}/NVIDIAImageScaling/NIS"
                            "${DLVR_FFX_SDK}/api/include" "${DLVR_FFX_SDK}/upscalers/include")
 target_compile_definitions(xinput1_3 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -367,6 +371,15 @@ add_executable(DyingLightVR_Launcher WIN32 EXCLUDE_FROM_ALL
 target_include_directories(DyingLightVR_Launcher PRIVATE ${SRC_ROOT}/launcher ${SRC_ROOT}/setup ${SRC_ROOT}/bootstrap
                            ${SRC_ROOT}/third_party/puff ${IMGUI_LAUNCHER} ${IMGUI_LAUNCHER}/backends)
 target_compile_definitions(DyingLightVR_Launcher PRIVATE UNICODE _UNICODE NOMINMAX)
+# Where the launcher installs and updates the mod from (fork 2026-11-28): the GitHub "owner/name" whose releases/latest it
+# reads (launcher_update.h kRepoUrl). Default is upstream; a fork sets its own (e.g. in the git-ignored
+# CMakeUserPresets.json) to hand out a launcher that pulls the fork's releases.
+set(DLVR_UPDATE_REPO "bymodify-ux/Dying-Light-VR" CACHE STRING "GitHub owner/name the launcher downloads mod releases from")
+if(NOT DLVR_UPDATE_REPO MATCHES "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    message(FATAL_ERROR "DLVR_UPDATE_REPO ('${DLVR_UPDATE_REPO}') must be a GitHub 'owner/name', e.g. bymodify-ux/Dying-Light-VR")
+endif()
+target_compile_definitions(DyingLightVR_Launcher PRIVATE "DLVR_UPDATE_REPO=\"${DLVR_UPDATE_REPO}\"")
+message(STATUS "DyingLightVR_Launcher: updates from github.com/${DLVR_UPDATE_REPO}")
 target_link_libraries(DyingLightVR_Launcher PRIVATE d3d11 dxgi windowscodecs shcore shell32 ole32 winhttp bcrypt advapi32
                       version shlwapi comctl32)
 set_target_properties(DyingLightVR_Launcher PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")

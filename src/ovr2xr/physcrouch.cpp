@@ -122,6 +122,11 @@ bool       g_standPubOk = false;
 volatile LONG g_liftCalls = 0, g_liftMaxMm = 0;
 // Pad thread -> the HUD panel (the OpenXR submit thread): crouch / stand edges sent (PhysCrouchEdges).
 volatile LONG g_edges = 0;
+// Climbing round 4 (tester 2026-11-28: a climb-up into a spot with only crouched room "will send me to the normal standing height, and
+// my head will go above the ceiling, it should leave me crouched"): climbhand asks for the crouch to be HELD until this tick (it
+// renews it while the spot over the feet has no standing room). Any thread -> pad thread. Held whether or not physical crouch is on.
+volatile ULONGLONG g_forceUntilMs = 0;
+bool g_forcedHeld = false;   // the press held is the force's alone (physical crouch off, or the head standing) - for the log
 // The game's own crouch drop of the spine / eye at duck 1 (INV-621 duck_run1 HSPINE1 -0.786..-0.836 m; flat runs 5b-5d eye bone
 // 0.813-0.818 m). The report is lifted by at most this x the duck factor.
 constexpr float kGameDropM = 0.80f;
@@ -242,10 +247,35 @@ void FlushWindow(ULONGLONG nowMs, float h)
 // COST per poll while on: one head pose read + NeckPivotReportedPos, a few dozen flops, one SRW shared read, ~6 guarded reads for
 // the sprint byte; at an edge only: ~5 guarded reads, one game call (slot 148), and once per manager pointer one RTTI name read.
 // Off: one bool test (and a release if a press is still held). scePad poll thread.
+void PhysCrouchForceUntil(unsigned long long untilMs)
+{
+    g_forceUntilMs = untilMs;
+}
+
 void PhysCrouchPoll(bool gameMenu)
 {
+    const bool forced = GetTickCount64() < g_forceUntilMs;
     if (!PhysicalCrouchEnable) {
-        if (g_held && Send(false)) { g_held = false; }   // switched off live with a crouch held: let it go
+        if (forced && !gameMenu) {   // climbing round 4: the crouch held for a crouched climb-up, physical crouch off
+            if (!g_gd) { g_gd = reinterpret_cast<uintptr_t>(GetModuleHandleA("gamedll_x64_rwdi.dll")); }
+            if (!g_held && g_gd && Send(true)) {
+                g_held = true;
+                g_forcedHeld = true;
+                InterlockedIncrement(&g_edges);
+                // [PROBE: PHYSCROUCH] gate=climb_by_hand  site=HEADSET  log-only=no
+                LOG("[PHYSCROUCH] CROUCH HELD for a climb-up into a low spot (climbhand: no standing room there) - 0x0F0F pressed; "
+                    "physical crouch itself is off");
+            }
+            return;
+        }
+        if (g_held && Send(false)) {   // switched off live with a crouch held (or the climb's force ended): let it go
+            g_held = false;
+            if (g_forcedHeld) {
+                // [PROBE: PHYSCROUCH] gate=climb_by_hand  site=HEADSET  log-only=no
+                LOG("[PHYSCROUCH] climb-up crouch RELEASED - standing room over the feet again (or the hold timed out)");
+            }
+            g_forcedHeld = false;
+        }
         g_arb.fromHead = false;
         return;
     }
@@ -352,7 +382,7 @@ void PhysCrouchPoll(bool gameMenu)
         const bool allowSlide = PhysicalCrouchSlide;   // physical_crouch_slide, read once per poll
         if (wants && sprinting && !allowSlide && !g_arb.fromHead) { ++w_sprintHeld; }
         const crouch::Act act = crouch::Decide(g_arb, wants, duck > 0.0f, sprinting, allowSlide);
-        const bool want = g_arb.fromHead;
+        const bool want = g_arb.fromHead || forced;   // climbing round 4: or held for a crouched climb-up (PhysCrouchForceUntil)
         if (want != g_held) {
             const bool ok = Send(want);
             if (ok) {
@@ -370,7 +400,8 @@ void PhysCrouchPoll(bool gameMenu)
                 // [PROBE: PHYSCROUCH] gate=physical_crouch_enable  site=FLAT  log-only=no
                 LOG("[PHYSCROUCH] %s %s | h %.3f stand %.3f (drop %.3f) | game duck %.3f, sprint %d | pad %d | %s",
                     want ? "CROUCH" : "STAND",
-                    act == crouch::Act::None ? "(head came up before the game crouched)"
+                    want && forced && !g_arb.fromHead ? "(HELD for a climb-up into a low spot - climbhand: no standing room there)"
+                    : act == crouch::Act::None ? "(head came up before the game crouched)"
                         : (want && sprinting ? "(SLIDE - sent while sprinting, physical_crouch_slide on)" : ""),
                     h, g_learn.standM, g_learn.standM - h, duck, sprint, want ? g_heldPad : (ok ? -1 : g_heldPad),
                     ok ? (want ? "0x0F0F pressed (held)" : "0x0F0F released") : g_lastRefusal);

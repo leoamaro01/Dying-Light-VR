@@ -26,6 +26,17 @@ extern float ClimbReleaseM;     // climb_release_m - a holding hand this far fro
 extern bool  ClimbMantleAuto;   // climb_mantle_auto - P3: pulled up far enough = the game's own climb-up (default off)
 extern float ClimbMantleM;      // climb_mantle_m - ...when the ledge is this far above the feet or less
 extern bool  ClimbMantleStick;  // climb_mantle_stick - the stick forward in a hang climbs up the game's way (default on)
+extern bool  ClimbFastClimbUp;  // climb_fast_climb_up - that climb-up ends once the body is up and past the lip (default on)
+extern bool  ClimbSkipReach;    // climb_skip_reach - the stick-up's reach when there is no ledge above is refused (default on)
+extern bool  ClimbLadderByHand; // climb_ladder_by_hand - P5: ladders / pipes / poles grabbed anywhere by hand, never the game's (default on)
+extern bool  ClimbJumpByLook;   // climb_jump_by_look - the jump button from a hang jumps at full force toward the look (default on)
+extern float ClimbJumpSideDeg;  // climb_jump_side_deg - a look within this of the wall / pole jumps straight up (default 45)
+extern bool  ClimbRoomCheck;    // climb_room_check - a climb-up only where you fit (crouched if need be; default on)
+extern bool  ClimbSkipGrabAnim; // climb_skip_grab_anim - a hand grab hangs at once (no grab animation; default on)
+extern float ClimbGrabMoveMps;  // climb_grab_move_mps - after a grab, the body glides this fast until the hand is on its spot (default 2)
+extern float ClimbSlideMps;     // climb_slide_mps - P5: a light grip on a ladder / pole slides down this fast (0 = never; default 2.5)
+extern bool  ClimbZiplineByHand; // climb_zipline_by_hand - P6: a grip next to a zipline rides it (default on)
+extern float ClimbSlideGrip;    // climb_slide_grip - a grip under this squeeze (past 0.5) is "light": it slides (default 0.85)
 extern bool  ClimbAutoLow;      // climb_auto_low - low walls still climb the game's way, look + jump (default off)
 extern float ClimbLaunchUpAssist; // climb_launch_up_assist - 0..1: a mostly-upward launch turned toward straight up
 extern float ClimbLaunchMinMps; // climb_launch_min_mps - P3: letting go while the hands move the body this fast = a launch (0 = never)
@@ -37,13 +48,32 @@ extern float ClimbLaunchScale;  // climb_launch_scale - the launch speed = the p
 // moveCtl = MoveController is the player's active controller (the carry after a launch / in any air time only runs under it).
 bool ClimbHandWalkOverride(uintptr_t player, const float in[3], float out[3], bool moveCtl);
 
+// P7 (design §8.21): the grappling hook as a rope. Asked on the same walk call BEFORE ClimbHandWalkOverride: true = send `out` (the
+// rope's velocity, world m/s) - from the game's rope reaching its pull state until you let go. Game thread. COST off / no rope: a few
+// reads per call (the rope controller's pointer, vtable and state).
+bool GrappleRopeWalk(uintptr_t player, const float in[3], float out[3], bool moveCtl);
+extern bool  GrappleRopeSwing;    // grapple_rope_swing - the grappling hook is a rope you swing on (default on; needs climb_by_hand)
+extern bool  GrappleTriggerPull;  // grapple_trigger_pull - holding the left trigger pulls you along it (default on)
+extern float GrapplePullMps;      // grapple_pull_mps - the pull's closing speed, m/s (default 15)
+extern bool  GrappleHoldToSwing;  // grapple_hold_to_swing - the left trigger held keeps the rope, the right trigger pulls (default on)
+// True while the rope holds the player with grapple_hold_to_swing and the trigger pull on: the right trigger is the pull, so the game's
+// R2 is withheld (ovr2xr.cpp's pad chain). Any thread. COST: one volatile load.
+bool GrappleRopeHoldsR2();
+extern int   GrappleThrowHand;    // grapple_hand - the trigger that throws / holds the hook: 0 left (default), 1 right
+extern int   GrapplePullHand;     // grapple_pull_hand - the trigger that pulls: 0 left, 1 right (default)
+// grapple_hand RIGHT: while the hook is the selected item or a rope holds, the game's L2 / R2 bytes trade places (the right trigger
+// throws, the left attacks). The pad chain calls it right after the trigger bytes are made, before the trigger rules. Pad thread.
+void GrapplePadSwap(unsigned char* p);
+extern bool  GrappleUnlockSkill;  // grapple_unlock_skill - the grapple skill needs no rank / point (the bootstrap acts on it at launch)
+
 extern bool  ClimbPinHands;     // climb_pin_hands - P4: a hand holding a ledge is drawn on its ledge point
 extern bool  ClimbLedgeLast;    // climb_ledge_last - two ledges held: the climb logic uses the last grabbed (off = their average)
 extern bool  ClimbStickShimmy;  // climb_stick_shimmy - the stick still shimmies while hanging (the game's own; default off)
 extern bool  ClimbBodyFollowsView; // climb_body_follows_view - the hanging body turns with the view
 extern bool  ClimbAirMomentum;     // climb_air_momentum - a launch keeps its own momentum in the air (physics, no stick)
 extern float ClimbAirDrag;         // climb_air_drag - how fast that momentum fades, per second
-extern float ClimbAirControl;      // climb_air_control - the stick's say in the air, 0 none .. 1 the game's own
+extern float ClimbAirControl;      // climb_air_control - LOCKED (round 16), read by nothing; see climb_air_control_pct
+extern float ClimbAirControlPct;   // climb_air_control_pct - the stick's push in the air, % of the gap per update (default 10)
 extern bool  ClimbAirMomentumAll;  // climb_air_momentum_all - the same for every jump and fall, not only launches
 extern bool  ClimbViewSmooth;      // climb_view_smooth - while climbing, the view follows the eye bone smoothly (no snaps)
 
@@ -77,9 +107,30 @@ bool ClimbHandFreezesBody();
 bool ClimbHandHanging();
 // P4 round 11 (climb_view_rigid): the share (0..1) of the rigid standing camera base this camera call, eased in while the ledge grab
 // runs in hand mode and out after (climbhand_logic.h RigidRampStep). Game thread (boneblend's EyePointApply).
-float ClimbViewRigidK();
+// Round 4: animGapM = the vertical gap between the standing eye point and the game's animated head (m, NaN = unknown): after the
+// grab ends the rigid view stays until the gap is small (the clip blended out), at most 1.5 s (climbhand_logic.h ViewHoldTail).
+// Round 6: the tail ends once per grab end, and also when the game's head has settled.
+float ClimbViewRigidK(float animGapM);
+// Round 4: the body holds (root, upper body) while the ledge grab runs in hand mode AND for 0.5 s after it ends, while the hang /
+// climb clip blends out (climbhand_logic.h BodyHoldTail). Round 6: not after a climb-up. Any thread.
+bool ClimbHandBodyHeld();
+// Round 6: the rigid view's remembered standing eye height (body-local y, m) from a new accepted standing value - a dip under it is
+// refused until it has held for 10 s (climbhand_logic.h StandRefStep). Game thread (boneblend's EyePointApply).
+float ClimbHandStandRef(float y);
+// P4 round 15: while the game's climb-up runs (the ledge grab in state 8 / 10, hand mode), how far the body's origin (originY, world)
+// is above the ledge top - the rigid view and the root hold come down by it (climbhand_logic.h OverLedgeM). Game thread (boneblend's
+// camera call); it also publishes the value for ClimbHandOverLedgeLast. 0 when not climbing up.
+float ClimbHandOverLedgeM(float originY);
+// The last value ClimbHandOverLedgeM published (any thread; 0 when its last call is older than 100 ms).
+float ClimbHandOverLedgeLast();
 extern bool ClimbViewRigid;        // climb_view_rigid - while climbing, the climb animations never move the view
 extern bool ClimbHoldBody;         // climb_hold_body - while climbing, the upper body keeps its upright pose (boneblend AhThrStep)
+
+// P5 / P6: true = the HUD prompt slot for this trigger is updated with no trigger (hidden): it is a ladder / pipe / rope (LadderDI)
+// and hand mode refuses the game's own ladder start (climbhand_logic.h HideLadderPrompt), or a zipline's prompt trigger
+// (FakeZipLineTrigger / ZipLine) while ziplines are grabbed by hand (HideZiplinePrompt). Any thread (HUD slot updates hop workers).
+// COST: a few bool tests; per trigger vtable one RTTI name read, then a cached compare.
+bool ClimbHandHidesPrompt(void* trigger);
 
 // Game thread, once per player update (boneblend.cpp HookTail): installs the detours the first time climb_by_hand is on, and writes
 // the 5 s [CLIMBHAND] line. Off and not installed: one bool test.

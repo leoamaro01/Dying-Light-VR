@@ -615,7 +615,7 @@ WfcrSnapshot ReadWfcrSnapshot()
 // grappleaim.cpp) uses the SAME mapping, declared in aimhook.h. Body unchanged.
 }  // namespace
 
-bool ComputeAbsoluteAim(float origX, float origY, float origZ, float out[3])
+bool ComputeAbsoluteAim(float origX, float origY, float origZ, float out[3], Hand hand)
 {
     // D5 (SPEC-HEAD-YAW-DECOUPLE-D, R10/R6): with the decouple active the head takes NO part in aim.
     // The XR->game yaw comes from the rig's own published mapping - camhook's `rel`, the angle the
@@ -628,7 +628,7 @@ bool ComputeAbsoluteAim(float origX, float origY, float origZ, float out[3])
         XrPosef controllerPose;
         float rel = 0.0f;
         const float ohLen = sqrtf(origX * origX + origZ * origZ);
-        if (!GetControllerPoseSteady(kRightHand, controllerPose) || ohLen < 0.10f ||
+        if (!GetControllerPoseSteady(hand, controllerPose) || ohLen < 0.10f ||
             !CamHookGetOpenXrToGameYaw(rel)) {
             return false;
         }
@@ -656,7 +656,7 @@ bool ComputeAbsoluteAim(float origX, float origY, float origZ, float out[3])
     XrQuaternionf headOrientation;
     // Steadied (comfort_hand_steady, C1): this is a shot direction, the thing hand steadiness is for.
     if (!GetAimHeadOrientation(headOrientation) ||
-        !GetControllerPoseSteady(kRightHand, controllerPose)) {
+        !GetControllerPoseSteady(hand, controllerPose)) {
         return false;
     }
 

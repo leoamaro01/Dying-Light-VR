@@ -11,9 +11,11 @@ extern bool GrappleHandOrigin;       // grapple_hand_origin       - A2: the ray 
 extern bool GrappleCrosshairMarker;  // grapple_crosshair_marker  - A3: the centre crosshair marks the hand ray. OFF.
 extern bool GrappleMarkerHideOnMiss; // grapple_marker_hide_on_miss - the dot leaves the screen when the cast hits nothing. OFF.
 extern bool FireReticle3d;           // fire_reticle_3d           - the gun reticle as a 3D quad (overlay.cpp). OFF.
+extern bool HideGameCrosshair;       // hide_game_crosshair       - the game's centre crosshair parked when no VR use is active. OFF.
 extern bool GrappleAimFromGun;       // grapple_aim_from_gun      - gun out: the grapple ray = the barrel line. ON.
 extern bool Grapple3dReticle;        // grapple_reticle_3d        - grapple CAN/CAN'T icons in 3D at the target. OFF.
 extern float GrappleReticleScale;    // grapple_reticle_scale     - its icon size, 0..1. 0.4
+extern int   GrappleAimHand;         // grapple_aim_hand          - the hand whose ray aims the grapple: 0 left, 1 right (default)
 #if defined(DLVR_BETA_LEAN)   // compiled out of BETA (docs/BETA_CENSUS.md): constant false, the gated code is dropped
 inline constexpr bool DiagMoveBob = false;
 inline constexpr bool DiagRayThreads = false;

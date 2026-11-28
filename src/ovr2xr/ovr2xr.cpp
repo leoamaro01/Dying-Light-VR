@@ -1265,6 +1265,7 @@ volatile LONG g_headSampled = 0;
 const char* const kOffOn[]       = { "off", "on" };
 const char* const kWristPreset[] = { "A", "B (split)", "Custom" };   // ui_wrist_preset (wristquad.cpp kPresets)
 const char* const kWristHand[]   = { "Left", "Right", "Off" };                  // ui_wrist_<piece>_hand (controllers.h Hand 0 / 1)
+const char* const kLeftRight[]   = { "Left", "Right" };                         // grapple_aim_hand / grapple_hand / grapple_pull_hand (Hand 0 / 1)
 const char* const kWristAnchor[] = { "Controller", "Forearm", "Hand" };         // ui_wrist_<piece>_anchor (wristquad.cpp UiWristAnchor)
 const char* const kSingleEye[]   = { "normal stereo", "left view only", "right view only" };
 const char* const kSymmetric[]   = { "pass real asymmetry", "vertical only", "both axes" };
@@ -1325,6 +1326,9 @@ constexpr bool BetaTextKept(const char* grp)
 #define S_BOOL(k, v, lbl, grp, help) \
     { k, SetType::Bool, &v, 0, 1, DLVR_BETA_TEXT(grp, lbl), DLVR_BETA_TEXT(grp, help), kOffOn, 2, grp, false, false }
 // A LOADBEARING switch Jay has locked on: never read from the file, never drawn (settings.h `locked`).
+// A bool read once at startup (the bootstrap reads it as text before the game loads its data - grapple_unlock_skill).
+#define S_BOOL_R(k, v, lbl, grp, help) \
+    { k, SetType::Bool, &v, 0, 1, DLVR_BETA_TEXT(grp, lbl), DLVR_BETA_TEXT(grp, help), kOffOn, 2, grp, true, false }
 #define S_BOOL_LOCKED(k, v, lbl, grp, help) \
     { k, SetType::Bool, &v, 0, 1, DLVR_BETA_DROP(lbl), DLVR_BETA_DROP(help), kOffOn, 2, grp, false, true }
 // The same lock for a slider (2026-10-08, D-184, Jay: "Lock them aswell" - the AFW tuning values).
@@ -2169,6 +2173,13 @@ const Setting kSettings[] = {
            "your hand on a ledge to grab it - it also catches a ledge if you keep the grip closed while falling past it - and open "
            "both grips while hanging to let go. While hanging, the stick still shimmies and climbs up, and the jump button still "
            "jumps, as before. Wall runs, tic-tacs, vaults and step-overs are not affected. OFF: climbing is the game's own."),
+    // 2026-11-28 (tester: the centre crosshair "doesn't really do anything at all in VR, it's just bothersome in the middle of the
+    // screen"): filed here at the tester's request, drawn beside the master switch (overlay.cpp DrawParkourTab kTop). grappleaim.cpp.
+    S_BOOL("hide_game_crosshair", dlvr::HideGameCrosshair, "Hide the game's centre crosshair", "Physical Parkour",
+           "ON: the game's own crosshair (the dot in the middle of your view, and the weapon brackets around it) is kept off the "
+           "screen. The VR aim markers stay: the 3D gun and bow reticles, the grapple's 3D icon (or its flat icon), and - if "
+           "grapple_crosshair_marker is on - the dot that follows where your hand aims the grapple. Takes effect at once while "
+           "fire_reticle_3d or grapple_crosshair_marker is on (fire_reticle_3d is on by default); otherwise after a restart."),
     S_FLOAT("climb_reach_m", dlvr::ClimbReachM, 0.10f, 0.60f, "Grab reach (m)", "Physical Parkour",
             "How close your hand must be to a ledge's edge for a grip to grab it."),
     S_INT("climb_catch_ms", dlvr::ClimbCatchMs, 0, 5000, "Catch time (ms)", "Physical Parkour",
@@ -2203,8 +2214,9 @@ const Setting kSettings[] = {
            "animations do to the character's head - only your body's movement and your own head move it. OFF: the view follows the "
            "character's head ('Smooth view while climbing' then softens it)."),
     S_BOOL("climb_hold_body", dlvr::ClimbHoldBody, "Upright body while climbing", "Physical Parkour",
-           "While climbing, your character's spine, neck and head keep the upright pose they had when you grabbed, instead of the "
-           "hanging and climbing animations bending the torso forward over the ledge. Your arms still follow your hands. Needs "
+           "While climbing, your character's spine, neck and head keep the upright pose they had when you grabbed, and the hips and "
+           "the body's root stay in their standing pose under the view, instead of the hanging and climbing animations bending and "
+           "lowering the body over the ledge. Your arms still follow your hands. Needs "
            "'keep your body still when you pull out a grenade or other throwable' on (it uses the same hold)."),
     S_BOOL("climb_view_smooth", dlvr::ClimbViewSmooth, "Smooth view while climbing", "Physical Parkour",
            "While climbing, the view glides after your character's head instead of snapping with the hanging and climbing animations. "
@@ -2216,6 +2228,65 @@ const Setting kSettings[] = {
     S_BOOL("climb_mantle_stick", dlvr::ClimbMantleStick, "Stick forward climbs up", "Physical Parkour",
            "While hanging, push the left stick forward to climb up onto the ledge (the game's own climb-up). The game never climbs up "
            "by itself while you hang (for example after a jump up). OFF: the stick does not climb up either."),
+    S_BOOL("climb_fast_climb_up", dlvr::ClimbFastClimbUp, "Quick climb-up", "Physical Parkour",
+           "A climb-up from a hang ends as soon as you are up on the top and past the edge, and you can move again. OFF: the game's "
+           "whole climb-up (about 2.2 s) plays out first."),
+    S_BOOL("climb_skip_reach", dlvr::ClimbSkipReach, "No reach when nothing is above", "Physical Parkour",
+           "While hanging, pushing the stick up where there is no ledge above to move to and nothing to climb onto does nothing. OFF: "
+           "the game plays its short reach up and drops back into the hang."),
+    S_BOOL("climb_ladder_by_hand", dlvr::ClimbLadderByHand, "Ladders and poles by hand", "Physical Parkour",
+           "Ladders, pipes and poles are solid things you grab anywhere and climb by pulling, like ledges - walking into one or "
+           "pressing use no longer starts the game's ladder climb. OFF: ladders, pipes and poles are the game's own."),
+    S_BOOL("climb_room_check", dlvr::ClimbRoomCheck, "Climb up only where you fit", "Physical Parkour",
+           "Before climbing up from a hang, checks there is room for you on top. Room to stand: the normal climb-up. Room only to "
+           "crouch: you climb up and stay crouched until there is room to stand. No room: you keep hanging. Small debris lying on "
+           "the top does not count. OFF: the climb-up always runs, wherever it puts you."),
+    S_BOOL("climb_skip_grab_anim", dlvr::ClimbSkipGrabAnim, "No grab animation", "Physical Parkour",
+           "When a hand grabs a ledge, ladder or pole, the game's grab animation (which swings your body onto the ledge, sometimes "
+           "through the wall) is skipped: you hang at once, and your body glides until your hand is on the spot it grabbed, at the "
+           "speed below. OFF: the game's grab animation plays first."),
+    S_FLOAT("climb_grab_move_mps", dlvr::ClimbGrabMoveMps, 0.5f, 4.0f, "Grab glide speed (m/s)", "Physical Parkour",
+            "How fast your body moves after a grab until the hand that grabbed is on its spot. Lower = gentler, higher = snappier."),
+    S_BOOL("climb_zipline_by_hand", dlvr::ClimbZiplineByHand, "Grab ziplines by hand", "Physical Parkour",
+           "Close a hand on a zipline's cable and you ride it, wherever you are looking - no jump needed. The game's own mount (a "
+           "jump at the line, or the button when its prompt would show) is off while this is on. OFF: only the game's way."),
+    S_BOOL("grapple_rope_swing", dlvr::GrappleRopeSwing, "Grappling hook is a rope", "Physical Parkour",
+           "Once the grappling hook catches, it no longer yanks you to it: it is a rope you hang and swing on, keeping your speed and "
+           "momentum. Let go with the jump button (or by landing, or reaching the hook). Needs Hand climbing on. OFF: the game's own "
+           "pull."),
+    S_BOOL("grapple_trigger_pull", dlvr::GrappleTriggerPull, "Hold the trigger to pull", "Physical Parkour",
+           "While on the rope, holding the pull hand's trigger pulls you toward the hook; let go of it and the pull stops. The pull adds to your swing, it does not replace it. OFF: the rope only swings."),
+    S_BOOL("grapple_hold_to_swing", dlvr::GrappleHoldToSwing, "Hold the trigger to stay on the rope", "Physical Parkour",
+           "Press and hold the grappling hand's trigger to throw the hook and swing; you stay on the rope until you let go of it (no "
+           "drop-off after a few seconds, landing or jumping does not let go). The pull hand's trigger pulls you in (it does not "
+           "attack while on the rope). OFF: the jump button, landing or reaching the hook lets go."),
+    S_ENUM("grapple_aim_hand", dlvr::GrappleAimHand, "Aiming hand", "Physical Parkour",
+           "The hand that aims the grappling hook: its reticle and where the hook flies. (With a gun out, the gun still aims it, as "
+           "set by grapple_aim_from_gun.)", kLeftRight),
+    S_ENUM("grapple_hand", dlvr::GrappleThrowHand, "Grappling hand", "Physical Parkour",
+           "The trigger that throws the hook (and holds the rope, with \"Left trigger holds, right trigger pulls\" on). Right: while "
+           "the hook is selected, the right trigger throws and the left trigger attacks.", kLeftRight),
+    S_ENUM("grapple_pull_hand", dlvr::GrapplePullHand, "Pull hand", "Physical Parkour",
+           "The trigger that pulls you along the rope (when pulling is on). If it is the grappling hand too: holding it part way "
+           "swings, squeezing it all the way pulls.", kLeftRight),
+    S_FLOAT("grapple_pull_mps", dlvr::GrapplePullMps, 3.0f, 30.0f, "Rope pull speed (m/s)", "Physical Parkour",
+            "How fast holding the trigger pulls you toward the hook at most. It gets there in about half a second."),
+    S_BOOL_R("grapple_unlock_skill", dlvr::GrappleUnlockSkill, "Grappling hook from the start", "Physical Parkour",
+             "The grappling hook skill (Survivor tree) needs no Survivor rank and no skill point: take it in the skill menu "
+             "whenever you like, from the start of the game. Takes effect at the next game start. OFF: the game's own rank 12."),
+    S_FLOAT("climb_slide_mps", dlvr::ClimbSlideMps, 0.0f, 3.2f, "Slide down ladders and poles (m/s)", "Physical Parkour",
+            "On a ladder or pole, hold on with a light grip (squeezed, but not all the way) and you slide down this fast; squeeze "
+            "fully to stop. At the bottom you let go and stand. 0 = no sliding."),
+    S_FLOAT("climb_slide_grip", dlvr::ClimbSlideGrip, 0.55f, 1.0f, "Slide below this grip", "Physical Parkour",
+            "How hard you squeeze to hold still on a ladder or pole: a grip below this (but still closed) slides you down. Higher = "
+            "you need a firmer squeeze to stay put."),
+    S_BOOL("climb_jump_by_look", dlvr::ClimbJumpByLook, "Jump button jumps where you look", "Physical Parkour",
+           "While hanging from a ledge, ladder or pole, the jump button jumps at the game's full jump: straight up when you look at "
+           "the wall or pole, otherwise off it in the direction you look (only left / right / behind counts, not up / down). OFF: "
+           "the game's own hang jump."),
+    S_FLOAT("climb_jump_side_deg", dlvr::ClimbJumpSideDeg, 10.0f, 90.0f, "Jump up within (degrees)", "Physical Parkour",
+            "For the jump button while hanging: looking within this many degrees of the wall or pole jumps straight up; further "
+            "round than that pushes off toward your look."),
     S_BOOL("climb_mantle_auto", dlvr::ClimbMantleAuto, "Pull up to climb up", "Physical Parkour",
            "While hanging, pull yourself up until the ledge is low enough (the height below) and hold still there a moment: the game's "
            "own climb-up runs. A fast pull you let go of is a jump, not a climb-up."),
@@ -2238,10 +2309,14 @@ const Setting kSettings[] = {
            "After a launch you keep the speed you jumped with until you land: walls and ledges still stop you, and only air drag "
            "slows you down; the stick steers as much as 'Air control' allows. OFF: after a launch the stick steers in the air as "
            "well, never adding speed on top of the launch."),
-    S_FLOAT("climb_air_control", dlvr::ClimbAirControl, 0.0f, 1.0f, "Air control", "Physical Parkour",
-            "How much the stick can steer you in the air while 'Keep momentum in the air' is on. Its push is added to your "
-            "momentum. 0 = none (pure momentum), 1 = the game's own air steering force, 0.5 = half of it. The stick never "
-            "pushes you faster than it would move you on its own."),
+    // round 16 (2026-11-27): replaced by climb_air_control_pct (a % instead of a share of the game's 1.06 %); locked, read by nothing
+    S_FLOAT_LOCKED("climb_air_control", dlvr::ClimbAirControl, 0.0f, 1.0f, "Air control (old)", "Physical Parkour",
+                   "Replaced by 'Air control (%)'."),
+    S_FLOAT("climb_air_control_pct", dlvr::ClimbAirControlPct, 0.0f, 100.0f, "Air control (%)", "Physical Parkour",
+            "How much the stick can steer you in the air while 'Keep momentum in the air' is on, added to your momentum. Each "
+            "update the stick closes this % of the gap between how fast it would move you and how fast you already go its way. "
+            "0 = none (pure momentum). The game's own air steering is about 1 %. The stick never pushes you faster than it would "
+            "move you on its own."),
     S_BOOL("climb_air_momentum_all", dlvr::ClimbAirMomentumAll, "Keep momentum on every jump and fall", "Physical Parkour",
            "'Keep momentum in the air' for all air time - the game's own jumps and falls too, not only launches from a ledge. "
            "OFF: only launches; the game's own jumps steer with the stick as usual."),
@@ -13559,6 +13634,10 @@ extern "C" __declspec(dllexport) void dlvr_FilterScePad(void* pData)
     // an in-game menu is up (MenuPassRestore). The rules still run, so their own state keeps up.
     unsigned char mpBefore[10];
     for (int i = 0; i < 10; ++i) { mpBefore[i] = p[i]; }
+    // grapple_hand (climbhand.cpp P7 round 3): a right grappling hand trades the game's L2 / R2 while the hook is selected or a rope
+    // holds - FIRST of the trigger rules, so every rule below sees the bytes as the game will (L2 = throw, R2 = attack). COST: one bool
+    // test + two volatile loads.
+    dlvr::GrapplePadSwap(p);
     if (g_meleeR2Suppress) {
         MeleeR2Filter(p);
     }
@@ -13597,6 +13676,12 @@ extern "C" __declspec(dllexport) void dlvr_FilterScePad(void* pData)
     // lidhand's RIGHT hand (side 0) carries an item - a lid container item or a world item, take to release - the game reads R2 = 0.
     // Same place as the three above. lid_by_hand=0 -> LidHandCarrying false. COST: one bool test + one volatile load.
     if (dlvr::LidHandCarrying(0)) {
+        p[0x09] = 0;
+    }
+    // grapple_pull_hand (climbhand.cpp P7, design §8.21 / §8.23): while the grappling rope holds you and the pull trigger is not the
+    // grappling one, that trigger lands on R2 and the game reads R2 = 0 (no attack / shot with each pull). Same place as the four
+    // above. COST: one volatile load.
+    if (dlvr::GrappleRopeHoldsR2()) {
         p[0x09] = 0;
     }
     if (dlvr::BodyGrabHandActive(0) && !dlvr::ThrowableHoldsL2()) {

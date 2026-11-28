@@ -347,8 +347,8 @@ Epic (EGL) note: every new RVA needs an EGL row from the private generator, or t
 | P2 hand motion | §4.4 anchor model and body write (T2), slip, collision kept on | Hang and pull yourself up and sideways along a ledge; hang on a wall corner; try to push through the wall | 1-2 weeks |
 | P3 mantle and launch (**round 1 built 2026-11-27**, §8.14: own lift over the lip, launch flight in the hold state, capped at the game's default jump) | §4.5, §4.6 | Mantle onto roofs of different heights; launch to a higher ledge; launch with no ledge (fall); low-ceiling mantle (crouch) | ~1 week |
 | P4 look, turn, hands | §4.7, §4.8 | Hang, look 180° behind, snap and smooth turn, check the view never moves on its own; the hands stay on the ledge | 3-5 days |
-| P5 pipes and ladders (after P2: it rides P2's hand-driven body) | §4.9 revised (U1-U4, T7) | Grab a ladder / pole at any height and climb hand over hand; turn with the stick (view only); jump up / back / sideways by looking; pull off the top | 1-2 weeks |
-| P6 extras | Ledge catch tuning, ziplines, the co-op test, XP (§8.2-§8.3: the award function and its numbers are known) | Two-player co-op session; climb at night and exhausted to check the multipliers | open |
+| P5 pipes and ladders (after P2: it rides P2's hand-driven body; **round 1 built 2026-11-27**, §8.16: the game's ladder start refused, grab anywhere as a hang on a made-up ledge; round 2 the surface grab and the ladder top; the look-aimed jump and the slide built in §8.17; pulling off a pole's top dropped) | §4.9 revised (U1-U4, T7) | Grab a ladder / pole at any height and climb hand over hand; turn with the stick (view only); jump up / back / sideways by looking; pull off the top | 1-2 weeks |
+| P6 extras (**XP, the jump button and ziplines by hand built 2026-11-27**, §8.17-§8.18) | Ledge catch tuning, ziplines, the co-op test, XP (§8.2-§8.3: the award function and its numbers are known) | Two-player co-op session; climb at night and exhausted to check the multipliers | open |
 
 Rough total: **6-10 weeks** of focused work, most of it headset iteration. Confidence: **medium for P1 to P5**.
 P2 was medium-low until round 2 showed the body moves by velocity through a call the mod already hooks (§8.1); what
@@ -1302,6 +1302,106 @@ improve immersion in a flatscreen game".
   Needs rig_throwable_body_hold and ANIMHOLD's proven player-only map (run 17: `THROWABLE HOLD READY`).
 - Also fixed: the Parkour menu's hang section said 6 keys while listing 7, so "climb_stick_shimmy" was never drawn there; the
   section sizes now come from the arrays.
+- **P4 round 13, the root and the run-up's stick** (tester 2026-11-27).
+  - "I think the problem is the hips though" / "we do need to hold the root as well". Round 12 already held the pelvis rotation, but
+    not bip01 above it. The pump shotgun's root hold (`RootPaStep`, INV-657: bits 8 + 9 on bip01's entry, the record written to the
+    latched standing reference) now also holds while the ledge grab runs in hand mode (`climb_hold_body`), keyed `kRtClimbKey` in
+    place of an item. The body stands under the rigid view instead of hanging lower and leaning. Accepted cost, as for the pump: any
+    root motion the clips play is frozen. The ARMED / RELEASED lines name "the hand-climb ledge grab". The tester thinks the body's
+    collider follows it and makes ledge jumps bump from below; the walk's capsule follows the body's origin, not the bones, so this
+    is expected to be visual only - to be confirmed in the headset.
+  - "I'm still getting automatic mantles from time to time, even though I have both settings disabled". The log (17:30:01): a grab
+    at the end of a running jump, GRAB END 0 -> 1, and 16 ms later the game's 1 -> 8 passed: climb_mantle_stick was on and the stick
+    was still forward from the run-up. `StickClimbPush`: the stick's forward now counts only for a push that started after the grab
+    did (the pad thread records the push's start and the grab's start); a held-over push is refused and says so.
+  - The other "automatic" climbs in that log are by design: a hand grab whose lip is below climb_hang_min_m (1.5 m; 0.96 m and
+    1.38 m there) is the game's own climb-over, not a hang. The tester's config now has 1.2 m (the setting's minimum).
+- **P4 round 14, the grab's own copy of the ledge** (run 18, tester 2026-11-27: four stacked ledges; "when I physically jump up to the
+  last one and move the joystick up, it moves me to the bottom ledge and shimmies up to the second ... I press up again and it moves
+  me to the 3rd and shimmies to the 4th, and when I press up THEN it mantles"). Run 18 climb #9: hands on y 143.3 / 144.5 / 145.6 /
+  146.8, then `1>13>1>13>1>13>1>8`. Every stick-up was re-targeted onto the top ledge, and from the second on the stale test called the
+  game's ledge "the same" - yet each shimmy started one ledge higher than the last.
+  - [BIN] The ledge grab keeps its OWN copy of the ledge point at eg+0x4C (+ the direction at eg+0x58), and the hang position
+    (eg+0x1BC) and hand points (eg+0x2B0..+0x348) made from it. +D16690 fills them from player+0x14C8 / +0x14BC. Its only caller,
+    +D14A08 in the grab's update, runs it after a set-state when player+0x14C8 no longer equals eg+0x4C - a path a hang in state 1
+    never takes. A finished shimmy moves the copy one ledge on, which is why each stick-up went one ledge higher.
+  - DoStart (the re-target) writes player+0x14C8 / +0x14BC, the target record [player+0x1600] and eg+0x38, never the copy. The stale
+    test read player+0x14C8 - the field we had just written - so it always said "the same" afterwards.
+  - Fix: RetargetInPlace calls +D16690 on the grab after DoStart (bytes checked at install, `hang-point refresh` line; unmatched =
+    not called, said once). `HeldStale`: stale when either the player's ledge or the grab's copy is not the held one. The RE-TARGET
+    line shows the copy before and after.
+  - Round 15, open (tester: "mantles seem to always leave me in the air a good half a meter above the floor over the ledge"). Run 18's
+    climb-ups #7 / #9 end with the body's origin within 2 cm of the lip's height (138.43 vs 138.42, 146.85 vs 146.83), the walk not
+    airborne, and the camera base 162 cm over the origin (the standing one) up to the grab's end. The climb-up recreates the walk
+    body (`[ROOMSCALE] walk body ok` with a new object each time). No cause found in the log; the CAM trace now goes on for 2.5 s after
+    a grab ends (`CAM AFTER`: the camera base's and the origin's height over the floor below by one ray, the walk's flags).
+  - Run 19 (tester: "As soon as the animation ends it drops me"): CAM AFTER +0 has the origin 1-5 cm over the floor and the camera
+    base ~166 cm over it, so by the grab's end it is already down - the lift is inside the climb-up. The reading taken: the game lifts
+    the body's origin over the top to clear the edge and sets it down at the end; the flatscreen view rides the animated head, the
+    rigid view and the root hold ride the origin. `OverLedgeM`: while the grab is in state 8 / 10, the rigid view and the climb's root
+    come down by (origin - the game's ledge point y), 0..1 m. `CLIMB-UP #n done` says how high the origin went over the top. Not
+    measured inside a climb-up yet (the probe's samples ran out) - that line confirms or refutes it.
+  - Also run 19 (tester: "now I am outside my body again when climbing, I see it in front of me"): the root hold never armed - all 8
+    climbs came before the first stand-still latch. For the climb, with nothing latched, the root hold now uses the standing record
+    every run has latched (t kRootRefT, q (0, -0.7071, 0, -0.7071), scale 1; `ROOT REFERENCE DEFAULTED`).
+- **P4 round 16** (run 20, tester 2026-11-27: "I'm still out of body when I grab a ledge, but it fixes after 1 or 2 seconds ... I'm
+  still mantling too high (but just a bit now, I'd say 10cm or less) ... I feel like I don't have any air control").
+  - Root hold late: 20 of 39 grabs armed exactly 2 s after the grab - the first try failed the layout check (record t vs the live
+    local, 2 mm) while the grab's clip blends in, then the 2 s refusal wait. A climb now retries every call, and skips the layout
+    check on a map where an arm already passed it (`g_rtLayoutOkMap`).
+  - The lift confirmed: `CLIMB-UP` lines 43-58 cm over the top. But the state ends with the origin still up (#1: 57 cm), and after the
+    grab the view is the game's own again. `OverLedgeStep`: the lowering is whole (not scaled by the rigid ramp), goes on after the
+    climb-up state until the origin is down (or 1.5 s, never growing again), and the climb's root stays held for it. Only a climb-up
+    from a hang counts, with the top taken when it began: run 20 #2 was a straight climb-over (0 > 8) and read a stale ledge, 1 m off.
+  - Air control: `climb_air_control_pct` (new, 0-100, default 10) is AirControlPush's k - the % of the gap along the stick closed per
+    walk update. `climb_air_control` (0-1 x the game's 1.06 %) is LOCKED, read by nothing.
+  - To watch in the headset: +D16690 also sets eg+0x268 = (the new hang position - the body) / eg+0x274, the grab's own move-to-hang
+    velocity. If a re-target yanks the body, that is where it comes from.
+- **P4 round 17** (run 21, tester 2026-11-27: "the mantle height is sometimes correct, sometimes too low, but what always happens is
+  that when I move the joystick up, even if it doesn't mantle, it doesn't let me move for 1 or 2 seconds").
+  - Too low: CLIMB-UP #3 / #4 / #5 ended their tail at the 1.5 s time-out with the origin still 4-16 cm over the ledge point. The body
+    stood on a floor that much higher than the lip, so that was no lift: the view was too low for 1.5 s, then jumped. `OverLedgeStep`
+    now ends the tail once the origin has not come down more than 1 cm for 150 ms (settled), and whatever is left (or left at the
+    time-out) fades out over 250 ms. The `CLIMB-UP` line says which: came down to the ledge point / SETTLED / TIMED OUT, and how much
+    was eased out.
+  - The 1-2 s without moving is the game's own climb-up from a hang: state 8 lasts 2.24 s every time, in this run and in runs 16 / 17
+    from before the root hold (a climb-over straight from a grab, 0 > 8, takes 0.78 s). The origin reaches the top's height about 1.1
+    s in, then the game lifts it over the edge and sets it down. With the rigid view that second looks like being stuck on top. "Even
+    if it doesn't mantle": the stick then gets the game's shimmy (1 -> 11 / 13), also its own timed animation. Not changed in round
+    17; round 18 cuts the climb-up short.
+- **P4 round 18, `climb_fast_climb_up`** (new, default on; tester: "Cut the climb-up short") [BIN]:
+  - How the climb-up ends: the timed-state update (`+D0A240`, its call at `+D0AD98`) moves 8 -> 10 when state 8's time runs out. The
+    ledge grab's update (`+D09E6C`) calls `+BB2390(player, 1, 0)` on the first update in state 10, which is the player's leave. The
+    drop (16) and state 18 use the same call. Then the detach (`+D09630`, a vtable slot: clears the active byte, state -1, hands the
+    walk the exit velocity through `+D11D90`). State 8 also calls `+D11D90` itself once its time passes a threshold.
+  - `FastClimbUpDone` (climbhand_logic.h): in state 8 of a climb-up from a hang (`OverLedgeState.climbing`), the feet (origin) at
+    least 5 cm over the held ledge (player+0x14C8) and at least 35 cm past it along its inward direction (+0x14BC). The Hook then calls
+    the game's own set-state 10. Run 21 #11's samples put that about 1.1 s into the 2.24 s.
+  - Its exit hands the walk the climb-up's velocity, still rising, so the launch's post path sets the body still: `SetLinearVel` 0
+    and the walk's vertical cleared, three updates.
+  - Log: `CLIMB-UP CUT SHORT n ms into the game's climb-up`, with the feet's height over the top and the distance past the lip.
+  - To watch in the headset: a body caught on the edge (35 cm in may be too little for the capsule), or a step back down off the lip.
+- **P4 round 19, shimmies and the empty reach** (tester 2026-11-27: "regarding shimmies, they have been broken forever ... it does
+  the animation, but then moves me back to where I was originally hanging. Same for up and sideways" / "remove the animation when it
+  doesn't find a place to shimmy and it can't mantle").
+  - Snap-back cause: each holding hand's anchor is the ledge point its search found (P2 round 2). The game's shimmy leaves the hold
+    states, so the anchors drop (PullStep) and re-latch on the same old points when the hang resumes. P2 then pulls the body back
+    to where the shimmy began. This is §8.11's "not solved here", from P1.
+  - `MoveShiftStep` (game thread) takes the feet at the last hold update before a game move (11-13, 15, 5, 9) and, back in a hold
+    state, publishes the shift with a sequence number in `GameView`. The pad thread adds it to every held ledge point before PullStep
+    re-latches on them. Jumps, the climb-up and the drop end the hang and never report a shift. Log: `GAME MOVE ended back in the
+    hang`.
+  - `climb_skip_reach` (new, default on): the stick-up's own search (`+D16480..`) sets 13 when it finds a ledge above and 5 / 9 (its
+    call at `+D16639`, after `mov edx,9`, byte-checked) when it finds none. That 5 / 9 is refused from its return address
+    (`GameMoveFromHang`'s reachNoLedge), after the usual re-target onto the held ledge, so a ledge above the held one still counts.
+    The jump button's 9 (`+D19D50`) is a different call and stays. The 5 s line counts the refusals.
+- **P4 round 20** (run 22, tester 2026-11-27: "even though it doesn't do any animation, it still leaves me unable to do any actions
+  for a second"). Shimmies confirmed: `GAME MOVE` shifts of 0.3-1.2 m, no snap-back reported. The reach still ran: 1 -> 9 -> 1 in
+  0.8 s each time, 0 refused. The stick-up's own 9 (`+D16639`) was re-targeted as designed. On the next update the hang's input
+  handler (`+D19CB5`: state 1, its input flag, `eg+0x588` clear) asked 9 again from `+D19D50`, and that call passed. So the stick up
+  reaches that handler too, and the "jump button only" reading of round 19 was wrong. `climb_skip_reach` now refuses every 5 / 9
+  from a hold, whichever call asks, and the return-address check is gone. Those two calls are the ledge grab's only 5 / 9 asks; the
+  option-bit variant 4 (`+D19D41`) stays the game's.
 
 **Headset test for round 5:**
 - Launch sideways and backwards off a wall. Expected: you keep flying the whole arc. Check the `LAUNCH CARRY` line.
@@ -1309,6 +1409,64 @@ improve immersion in a flatscreen game".
   there.
 - Catch a ledge mid-launch with a hand.
 - Hang, turn your head and shimmy around a corner. Expected: the body follows your view, and the view glides instead of snapping.
+
+### 8.16 P5 round 1 (2026-11-27): ladders, pipes and poles grabbed by hand [BIN + CODE]
+
+**T7 / U2 answered (the game's ladder start).** `+B9F4F0(player, g)` (seen in `+D35C20`) is "leave group g if it is the current
+one", not a start. The group-7 switches (`+B9F220(player, 7, 1, 0)`) that start the ladder:
+- `+BDCF0F`, the use key: `+BDCAE0` is the player's use handler. Its use target (player+0x14A0, valid while +0x1498 is set) is
+  dynamic-cast to LadderDI (action 0x2B).
+- `+BDD277` / `+BDD734`, walking into it: `+BDD040` checks the same use target.
+Each first hands the LadderController (player+0xBD8) the LadderDI (`+D3C9E0`: weak refs at +0x168 and in OwnerLadderInfo +8).
+`+ABB412` is a fourth group-7 caller, left alone (not the player's ladder paths).
+
+**The climbable's geometry (U1's alternative).** OwnerLadderInfo (vtable `+172E178`) wraps the LadderDI. Its slots read the LadderDI's
+IControlObject (+0x18):
+- `+0x10` GetWorldPosition; `+0x18` GetForwardVector; `+0x20` GetLeftVector;
+- `+0x28` the kind (+0x36C: 0 ladder, 1 pipe, 2 rope, 3 underwater rope); `+0x30` the turn limits (+0x380 / +0x384);
+- `+0x38` the height over GetExtentsInWorld's bottom (extents: min +0, max +0xC); `+0x40` the local x extents x the scale.
+The attach (`+D34340`) puts its axis point (+0xE0) at the position - 0.42 x forward (xz).
+
+So the climbable is found without any ray: the use target named LadderDI, or a LadderDI that a search ray hit (OwnerIsCharacter now
+also names those). Its line is the position (xz), between its world extents' bottom and top.
+
+**Built (`climb_ladder_by_hand`, default on):**
+- `GroupHook` detours the group setter `+B9F220` (its 14 checked bytes) and refuses group 7 from those three return addresses
+  (`RefuseLadderStart`), for the local player only. Our own group switches go through the trampoline. The gate is installed only
+  when the grab's exports resolved.
+- A searching hand near the climbable: `PoleInReach` checks the horizontal distance to the line minus its half-width (0.12 m pipes /
+  ropes, 0.35 m ladders) against climb_reach_m, between its ends +- 0.1 m. That grabs it anywhere. `PoleLedge` makes the ledge:
+  into = feet -> line (or its forward vector), lip = the near surface at the hand's height (at most the top), edge 0.5 m across.
+  The grab is then the ledge grab's own start, forced to hang, and the hang is the P2 hand-driven body as on ledges.
+- While a pole hang runs (`g_poleOn`), a second hand joins only on the pole. The game's climb-up, shimmies and reaches from it are
+  all refused, with no re-target (`GameMoveFromHang` pole). climb_mantle_auto is off for it. Launches and drops are unchanged.
+- Log: `CLIMBABLE` (once per object: kind, line, forward, extents, the feet), `POLE GRAB started`, `JOIN ... on the pole`,
+  `out of reach` (once per search), `the game's own ladder start ... REFUSED`. The 5 s line counts refused starts.
+
+**Open for the headset (round 1 is the carrier test, U3):**
+- Does the ledge grab keep a hang on a made-up ledge, or drop itself (GRAB END / 16 lines)?
+- Is the line the climbable's centre? The 0.42 m standing offset suggests yes for pipes. For ladders the position may be the
+  ladder's plane.
+- The grab animation lifts the body to hang from the hand point, so a pole grabbed at chest height lifts you.
+- Not built yet: the jump rules (look toward / away, `climb_pole_jump_side_deg`; built in §8.17 as `climb_jump_side_deg`, for ledges
+  too), pulling off the top, sliding, ledge holds mixed
+  into a pole hang.
+
+**Round 2** (run 23, tester 2026-11-27: "mostly great ... a lot of objects the game codes as ladders/poles/pipes/whatever are not
+thin poles ... I want to be able to grab anywhere on the surface of the ladder/pole/whatever collider. But functionality while
+climbing was great" / "There is no way to mantle on top of ladders ... I had to perform a physical jump at the top of the ladder
+to grab the ledge above it mid air").
+- Run 23 confirmed the carrier (U3). Pole hangs held, and the gate refused every walk-in and use-key start.
+- The search rays DO hit the climbable: `first ray hit on class 'LadderDI'`, so the collider's owner is the LadderDI. The grab
+  is now on that surface. `PoleSurfaceFind` casts 10 short rays around the hand (8 around, up, down), each from 0.30 m behind the
+  hand to climb_reach_m past it, and takes the hit owned by a LadderDI nearest the hand. `PoleLedgeAt` makes the ledge there:
+  lip = that point, into = feet -> point (the climbable's forward vector when the feet are under it).
+- Round 1's centre line and fixed half-widths (`PoleInReach` / `PoleLedge`) and the use-target candidate are gone. The line and
+  extents are only logged (`CLIMBABLE`) and give the facing fallback.
+- The top of a ladder: before any climb, and during a pole hang, the ledge search runs FIRST. A real ledge wins. During a pole hang
+  the hang goes over to it (`RetargetInPlace`, `g_poleOn` off: `LEDGE FROM THE LADDER`), so the climb-up, the stick and the pull
+  height work from there as on any ledge. A "ledge" whose top is the climbable's own collider (a rung, the ladder's top: one ray
+  down just past the lip, owner LadderDI) does not count; the surface grab takes it instead.
 
 ### 8.9 LadderController map (T5, static analysis 2026-11-26) [BIN]
 
@@ -1371,6 +1529,432 @@ moves a rung. The probe now logs all of it (below).
 - The END summary carries the ladder's state sequence.
 - A ledge grab alone now gets 120 samples per climb (`kLedgeSamplesPerClimb`), not 900, so a session no longer runs out before its
   ladders and poles.
+
+### 8.17 P6 round 1 (2026-11-27): climbing XP (X1), the look-aimed jump button, P5's slide [BIN + CODE]
+
+**Most hand climbs already pay XP, with no code of ours [BIN].** The award (`+D0D777` → `+CEA740`) sits inside the set-state
+itself (`+D0CD20`). It fires on any transition whose previous state (`+0x200`, written at `+D0CD83`) is 8, whatever the new state
+is, when the grab's vfunc `+0x28` passes (`+D0D6C3`). So these all pay the game's own climb XP, by the climb's type (`+0x1F8`,
+0 for a hang = `RunnerXPClimbFromBottom`, 15 / 30):
+- the stick's climb-up from a hand hang;
+- `climb_mantle_auto`'s climb-up;
+- round 18's cut-short climb-up (8 → 10);
+- a climb-up from a ledge reached off a ladder.
+
+Shimmy-ups (`+CEA6A0`) stay the game's moves and pay as before.
+
+**Paid by us:** a launch caught by a new grab, which the game never sees because the launch drops the ledge grab.
+- A launch arms `LaunchXp` with the feet. The next ledge or pole/ladder grab start spends it (`LaunchCatchPays`).
+- It pays when the grab comes within `kLaunchXpWindowMs` (2.5 s) of the launch and the feet are at least `kLaunchXpMinM` (1 m)
+  from where they left.
+- It calls `+CEA740(*(PlayerDI+0x13E0), 5)` (`RunnerXPClimbJump180`, 10 / 20). The game's skills, night / exhaustion factors,
+  co-op gates and its own 1.3 m / 5 s anti-farm all still apply. The 19 prologue bytes are checked at install. No match = no
+  launch XP.
+- No new settings, per the X1 decision.
+- **Log:** an install line; "LAUNCH CAUGHT by a … ms after the launch, the feet … m from where they left | climb XP: …" per
+  catch; the 5 s line counts the award calls and faults.
+
+**The jump button from any hang, ledge or pole (P5's look-aimed jumps, widened)** [BIN + CODE]. Tester 2026-11-27: "pressing the
+jump button should make you jump at full force (so the flatscreen game's default) from wherever you are hanging towards wherever you
+are looking. This is both for ledges and poles".
+- **The ask.** The hang's input handler `+D19BA0` (action 0xB, state 1) asks 4 (`+D19D41`) or 9 (`+D19D50`). Both call sites are
+  checked as `call +D0CD20` at install and named by return address in StateHook.
+- **Stick or button.** The stick pushed up reaches the same handler (round 20). An ask with the stick freshly forward
+  (`kStickFreshMs`) stays the stick's: its reach rules still apply. Any other ask is the jump button.
+- **What happens.** StateHook refuses the game's jump, and the next Hook jumps (`JumpButtonAsk`, `LookJumpVelocity`).
+  - The aim compares the yaw of the headset's forward in the game world with the hang's into-the-wall direction (`player+0x14BC`).
+    The headset forward uses the hands' yaw mapping (`HeadForwardGame`), published by the pad thread. Pitch never counts.
+  - Under `climb_jump_side_deg` (45°) = straight up at the game's full jump (4.45 m/s, JumpMaxHeight 1.01 m).
+  - At or beyond it = the same 4.45 m/s up plus WallJumpBackSpeed (3 m/s) horizontally along the look.
+  - No fresh headset pose or no readable wall direction = straight up.
+- **The launch itself** is P4 round 5's: the drop, then the post path and the carry (`StartLaunch`, now shared with the hands'
+  launch). It also arms the launch-catch XP.
+- **Settings:** `climb_jump_by_look` (on; off = the game's own hang jump) and `climb_jump_side_deg` (10-90, 45). Both are in
+  "Launching off". `climb_jump_side_deg` replaces the planned `climb_pole_jump_side_deg`, since it now covers ledges too.
+- **Log:** the two install lines; "JUMP BUTTON from a ledge / ladder / pole hang … JUMPED: straight up / a push-off along the look
+  | velocity … | the look is N deg from into the wall"; the 5 s line counts up jumps and push-offs.
+- **Headset test:**
+  - Hang from a ledge: jump looking at the wall (up), over each shoulder (sideways), and behind (backward).
+  - Do the same on a ladder and a pole.
+  - Check that the stick up still does what it did before.
+
+**P5's slide down a ladder / pole (§4.9 "Slide")** [CODE].
+- **The grip.** On a pole hang, every holding hand's grip is held but light: squeezed past the 0.5 hold threshold, under
+  `climb_slide_grip` (0.85). That slides the body down (`SlideGrip`).
+- **The motion.** Each pad poll moves the held anchors (`g_pull.anchor`, `g_holdLip`) down by `climb_slide_mps` × dt (`SlideStep`).
+  P2's hand-driven body follows them.
+  - The speed is capped at 0.8 × `climb_pull_max_mps`, so the body keeps up and no hand drifts past `climb_release_m`.
+  - dt is capped at 50 ms.
+- **Stopping.** A full squeeze stops it; opening the grips is the plain let-go.
+- **The bottom.** It ends at the climbable's world bottom (its extents, feet within 5 cm), or when the feet stop going down
+  (under 2 cm in 250 ms: the ground, or an unreadable climbable). The hang then ends with the plain drop (`g_reqDrop` 4).
+- **Settings:** `climb_slide_mps` (0-3.2, 2.5; 0 = no slide) and `climb_slide_grip` (0.55-1.0, 0.85), with "Ladders and poles by
+  hand".
+- **Log:** "SLIDE started on the ladder - grips …", "SLIDE reached the BOTTOM / STALLED / stopped …", the DROP line's slide reason,
+  and the 5 s line's sliding polls.
+- **Open:**
+  - The game's own slide speed was not read (LadderController state 13's scaled move vector), so 2.5 m/s is a guess.
+  - Whether a "light" grip is comfortable to hold on each controller (Index force vs Quest analog).
+- **Pulling off the top of a pole: dropped.** The tester (2026-11-27): "okay for poles since there isn't anything really on
+  top, and the flatscreen game doesn't let you with those anyway". The ladder top was round 2's ledge-first search.
+
+**The ladder's use prompt hidden** (tester 2026-11-27: "remove the ladder use floating UI when the ladder hand climbing setting is
+enabled") [CODE].
+- Every HUD prompt slot update goes through looting's detour of `HudTriggerSlot::Update` (`SlotUpdateHook`).
+- When the trigger is a `LadderDI`, `climb_ladder_by_hand` is on and the ladder gate is live (`HideLadderPrompt`), the slot is
+  updated with no trigger: the game's own "nothing targeted" path, which the hook already sees.
+- That hides the game's HUD prompt and the mod's in-world copy (`PromptQuadOnSlot` returns on null).
+- The ladder class is matched by RTTI name once per vtable and thread, then by a cached compare (`ClimbHandHidesPrompt`).
+- **Log:** "LADDER PROMPT hidden …", once.
+
+**Not done:** dropping onto a ledge from above (type 3) has no hand-mode equivalent yet. **Headset test:** launch to a ledge
+about 2 m away and check the Runner XP popup; then repeat within 5 s at the same spot (the game's anti-farm should refuse).
+
+### 8.18 P6 round 2 (2026-11-27): ziplines by hand [BIN + CODE]
+
+**How the game starts a zipline (static, `+BD3C60`, the player's per-update try beside the ledge grab's `+BD4450`).**
+- **The line list.** Every zipline is in one global list: `Entity**` at `+1BA8D08`, the count at `+1BA8D10`. Entries are added by
+  `+B19520`.
+- **Each zipline entity:**
+  - A = start `+0xA8`, B = end `+0xB4`, D = unit A→B `+0xC0`;
+  - its model `+0xD0`, its name `+0xD8`;
+  - B is cut back by `1.5·D` at init.
+- **Choosing the line.** `+B19850` takes the line nearest a body point over the whole world, among renderable ones
+  (`IModelObject::IsRenderable` on `+0xD0`). Its grabbable part is `[A, B − 4.5·D]`.
+- **The tests:**
+  - the body point at most 0.4 m above and 2.1 m below the line;
+  - the body yaw (`player+0x11EC`) within 30° of A→B;
+  - jump (action 0xB, through `+BA0F20` → the input lookup) held;
+  - the walk body in the air (`+BABED0` → walk vfunc `+0x468`, bit 1 of `+0x2C0`);
+  - within 1.5 m. Without the air path, the look ray must also be within 10°.
+- **The start.**
+  - ZipLineController (`player+0xCA8`) `+0x88..+0xA8` = A, B, D and `+0xB0` = the entity.
+  - `+87FC0(ctrl+0xB8, name)`, the string assign.
+  - `+B9F220(player, 27, 1, 0)`.
+
+**Ours (`ServeZip`, `ZipDistance`, `ZipGrabOk`).**
+- **When.** A grip whose ledge search finds no ledge (and no ladder / pole) runs the zipline check. Its hand must be within
+  `climb_reach_m` of the nearest renderable line's grabbable part, with no ledge grab running and no ride already going.
+- **Then.** It writes the same record, name and group switch: no look, facing or air test. The ride is the game's from there.
+  - The line runs A→B whichever way the player faces.
+  - The game's own jump start still works.
+- **Byte checks.**
+  - The list's address comes from the game's own `cmp dword ptr [count], 0` at `+B19866` (83 3D disp32 00).
+  - `+87FC0` is byte-checked.
+  - The controller is RTTI-checked (`ZipLineController`).
+- **Setting:** `climb_zipline_by_hand` (on), with "Ladders and poles by hand".
+- **Log:**
+  - the install line (list found / name assign / IsRenderable);
+  - "ZIPLINE STARTED / REFUSED – hand … m from line … | the controller is ACTIVE / NOT active after the group switch";
+  - the 5 s line counts.
+- **The zipline's prompt hidden** (tester: "If the setting is on, are hud prompts hidden for ziplines? they should"). The game's
+  hint object at `player+0x2CA8` is a `FakeZipLineTrigger`, placed in front of the player each update a line is a candidate.
+  INFERRED: it is the HUD's trigger for the zipline prompt. Its slot updates, and a `ZipLine`'s, go through `ClimbHandHidesPrompt`
+  like the ladder's (`HideZiplinePrompt`), while ziplines by hand are live. Log: "ZIPLINE PROMPT hidden …", once. If no such
+  line appears near a zipline, the prompt comes from somewhere else.
+- **Hands on the cable (round 3, 2026-11-28).** Tester: "your hand snaps to the line and moving your hand moves your body, same way
+  it is for ledges, you should also be able to launch yourself off in some direction, not just drop off" / "drop off is good, and
+  the game sliding you down is good as well".
+  - **The ride, static RE** [BIN]:
+    - ZipLineController main vtable `+1734870`: Update `+DD5C00`, Activate `+DD53E0`, Deactivate `+DD5B60`, Input `+DD63F0`,
+      SetState `+DD6530`. IMoveController slot 0 `+DD7220` is the wanted velocity.
+    - The velocity is speed `+0x7C` × D plus a P-correction (k ≈ 10/s, `tmin` 0.1 s) toward its hang point under the cable. The
+      hang point is recomputed every update from the body, so nothing along the line is stored and the along-line part is never
+      fought.
+    - **End:** at the line's end, state 3 then `+B9F4F0(player, 27)`.
+    - **Jump-off:** state 4 → `+B9F4F0`, then the look × 4.5 m/s through `+D4D330`. Duck → state 3.
+    - Both exits set `[player+0xBA0]+0x30 = 1`.
+    - Slot 17 `+DD6820` clears the "same line" cache 1 s after a ride.
+  - **Ours (`ZipHold`, `ZipWalk`, `ZipEnd`):**
+    - The grabbing hand's anchor is the grab point on the cable. It rides with the cable: the along-cable part of the ride's
+      velocity, integrated in the walk call, is published as the advance.
+    - A second grip within `climb_reach_m` of the cable joins at its nearest point.
+    - In the walk call the ride's along-cable velocity is kept and the hands' pull (P2's `MotionStep`) replaces the rest, so the
+      hang point never fights the hands.
+    - Opening every grip → the game's exit (`+B9F4F0(player, 27)`, byte-checked; the walk's exit flag), then the ride's
+      along-cable velocity plus, when the hands were pulling fast, `LaunchPick`'s launch, through the post path and carry
+      (`HandOffVelocity`, shared with the ledge launch).
+    - A hand pulled past `climb_release_m` slips. The game ending the ride ends the hold.
+    - Held grips are withheld from the game.
+  - **Log:** "ZIPLINE HOLD …", "JOINED / SLIPPED", "ZIPLINE LET GO (…) – a LAUNCH / a drop | the controller is off | velocity …",
+    "ZIPLINE HOLD ended by the game"; the 5 s line counts driven walk calls, let-gos and launches.
+  - **The game's jump start refused** (tester 2026-11-28: "I think it works well enough when I managed to do it, but pressing A is
+    still mounting me on the zipline").
+    - `+BD3C60`'s group-27 switch at `+BD43BF` is checked as `call +B9F220` at install and named by its return address in
+      `GroupHook`. It is refused for the local player while ziplines are grabbed by hand (`RefuseZiplineJumpStart`).
+    - Our own start goes through the trampoline. The jump stays a jump.
+    - The group gate is the ladder gate's detour, so it needs that detour live.
+    - The other group-27 caller (`+B983C1`, from `player+0x3B8`, origin unknown) is left alone.
+    - Log: "the game's own zipline start … REFUSED", at most once per 5 s; the 5 s line counts them.
+  - **Open for the headset:**
+    - Does the walk honour our vector during the ride? It is the same detour as the ledge hang.
+    - Does the body hang well from the hand with the ride's vertical correction removed?
+    - Does the exit leave a clean fall with no stuck animation? `+BA1FD0` / `+BD9D20` / `vfC10(4)` from the game's jump-off are
+      not called.
+- **Open for the headset:**
+  - Does the controller take a start from standing (the game only ever starts it in the air)?
+  - Does it compute its own attach point from the record, or does the body snap?
+  - Is the "same line as the last ride" cache (the stock code refuses a candidate equal to the record) a problem when a line is
+    grabbed twice? Ours rewrites the record anyway.
+
+### 8.19 Round 4 (2026-11-28): the second zipline mount, no grab animation [BIN + CODE]
+
+- **Tester:** "Zipline is still triggering from pressing A ... disable both."
+  - The log showed "the game's jump starts refused 0" during a ride, so the A press had not gone through `+BD43BF`.
+  - The game has a second group-27 call at `+B983C1`, inside the player's action dispatch. It runs on the use/jump press while
+    the zipline hint (`player+0x2CA8`, `+0x380`) is valid. It copies the hint's line record (`+0x340..+0x370`) into the
+    controller (`+0x88..+0xB8`) and mounts.
+  - The 48 calls to `+B9F220` were scanned. Only `+BD43BF` and `+B983C1` pass a literal 27; five callers pass a group from a
+    register and were not traced.
+  - `GroupHook` now refuses both return addresses. Each one is byte-checked as `call +B9F220` and logged at install as start
+    #1 / #2.
+- **Tester:** "the 'go to grab mode' animation often makes me clip through walls or moves me in a weird way. Could you get rid of
+  the animation completely and just move me towards the grab position", then "make the speed configurable".
+  - **How the grab ends:** state 0 is the game's root-motion swing. `+D0A240` ends it purely on its timer (vf+0x30 minus
+    `+0x25C`, compared against `+0x254`), choosing 8 or 1 and calling set-state at `+D0A4B9`. Nothing else is done there.
+  - **`climb_skip_grab_anim`** (default on): on its first update in state 0, the hand grab that is due to hang gets set-state
+    1 from the Hook. The "due to hang" test is the one that arms StateHook's 0 → 1 (`g_hangEg`, inside its window, and
+    `climb_always_hang`). Low walls keep the game's climb-over.
+  - **`climb_grab_move_mps`** (default 2.0, range 0.5–4): the hold's pull then moves the body onto the hand's ledge point
+    through the walk, so collisions apply. While any anchored hand has not yet settled (`kSettleM`), the pull is capped at
+    this speed; after that the cap is `climb_pull_max_mps`. This also applies with the animation on, where run 2026-11-28
+    sent 3.99 m/s at the hang's start.
+  - The 5 s line counts the skips and the walk calls that glided.
+- **Open for the headset:**
+  - Does state 1 entered straight from 0 hang cleanly, with no stuck pose or arm animation?
+  - Does the glide feel right at 2 m/s?
+  - Does A still mount a zipline?
+
+### 8.20 Round 5 (2026-11-28): the zipline launch, the holds' tails, room to climb up [BIN + CODE]
+
+- **"The first one I went to grab ... launched me into the air straight up like 50-100m":**
+  - The log has the button mount (start #2) refused at 16:04:01.
+  - Right after `+B983C1`, `+B983C6..+B9843D` calls `+D4D330`, which jumps the player by (`ctrl+0x48` − the player's position).
+    `ctrl+0x48` is the attach point, and the controller only fills it when the group switch goes through.
+  - With the switch refused, the point is stale: (0,0,0) on the session's first line, roughly 140 m off.
+  - **Fix:** the whole try-start `+BD3C60` (one call per update, from `+B96AC8`) is detoured and skipped while ziplines are
+    grabbed by hand.
+    - It still clears `hint+0x380`, as its own first write does, so the hint never arms and neither mount can run.
+    - The prologue check is 19 whole instructions, none of them position-dependent.
+    - The two group refusals stay as a backstop.
+- **"The body (not my view) shortly moves to under the ledge" after a grab / the view dips after a climb-up:**
+  - **Cause (inferred):** the holds (root, upper body, rigid view) let go on the update the ledge grab ends, but the game's clips
+    are still blending out at that point.
+    - The hang clip's root is authored for the game's own hang spot under the ledge. The hand-driven body is somewhere else, so
+      the released root swings toward that spot and back.
+    - The climb-up's end pose is a crouch that stands up. The camera trace at 15:41 has the game's head 107 cm over the origin
+      at the end and 150 cm 750 ms later.
+  - **Tails:** the body holds stay on for 0.5 s after the grab (`BodyHoldTail`). The rigid view stays until the animated head is
+    within 8 cm (vertical) of the standing eye point, at most 1.5 s (`ViewHoldTail`), and then eases out.
+  - **New log lines:**
+    - `ROOT AFTER CLIMB +N ms` traces the animation's bip01 against the standing reference every 100 ms for 1 s after release.
+      This confirms or rules out the cause above.
+    - `RIGID VIEW TAIL ended` says how long the tail lasted and how far off the head was.
+- **Room to climb up (`climb_room_check`):** "mantled and went to the ceiling onto the upper floor", "it should leave me crouched".
+  - **The test (`ClimbUpRoom`):** three vertical columns at the spot 0.5 m past the lip, one at the spot and one 0.2 m to each
+    side along the edge.
+    - Each column has an up ray and a down ray between 0.5 m above the top and the height being tested: 1.80 m to stand,
+      1.15 m to crouch.
+    - Debris under 0.5 m is ignored.
+  - **The outcomes:**
+    - Stand: the game's climb-up runs.
+    - Crouch only: the climb-up runs, and the game's crouch is held (`PhysCrouchForceUntil`, the `0x0F0F` hold, which works
+      with physical crouch on or off) until one column over the feet has standing room.
+    - Neither: refused, and the hang stays.
+  - It applies to both the stick and the pull-height climb-ups. Results are cached per ledge point for 300 ms, because the game
+    asks every update while the stick is held.
+- **Open for the headset:**
+  - Is the body swing gone? Check the ROOT AFTER CLIMB lines.
+  - Does the climb-up's crouch take while the climb runs, or only after it ends?
+  - Is 1.15 m the right crouch height?
+
+### 8.21 P7 (2026-11-28): the grappling hook as a rope, the skill from the start [BIN + CODE]
+
+- **The asks:** "It should no longer pull you automatically, but rather only while holding the trigger with which you launched it
+  ... If you stop holding the trigger, it stops pulling." / "It should act like an anchor point, like a rope, so you can swing on
+  it (it respects your momentum and speed when you use it) and using the trigger to pull affects the swing, doesn't override it."
+  / a setting for the grapple skill from the game start (off by default) / a setting to remove the trigger pull (swing only).
+- **How the grapple works in VR (read, not changed):**
+  - It is the item `Special_Hook` (ItemType_Hook, 47), fired by `_ACTION_USE_EQUIPEMENT` = L2 = the left trigger (`vr_left_trigger`).
+  - The aim is the right hand's ray (grappleaim.cpp).
+  - The skill is StatusHook (Survivor, `level_req` Status 12, one point, effect `CanUseHook`). Its SkillReward hands over
+    `Special_Hook`.
+- **The game's rope [BIN, gamedll 97046bba]:**
+  - `RopeLocomotionController` (RTTI; vtable `+17310D8`) sits at PlayerDI+3200. Slot 16 is the dispatcher `+D74AF0`; slots 18 / 19
+    are Start / Stop (`+D75200` / `+D75340`; Stop is SetState 0 + active byte 0).
+  - Its state is `+0x48`, and only `+D7A260` sets it.
+    - States: 1 → 2 (`+D74CD0`, the throw) → 3 (`+D78797`, the hook caught).
+    - In state 3, `+D78C80` runs the pull every update. It sets a rope-owned walk air factor through `+BE08F0`, and `+BE09A0`
+      restores it.
+    - The pull ends at 4, at 5, or with the walk controller's jump (`+D79E6A`: `+D4D330` on PlayerDI+0xBA0, mode 24 — the same
+      call the zipline's stale jump went through).
+  - The hook point is `+0x88`. The controller group is 24 (`+D759E4`).
+  - The game's data has `GrapplingHookExtraGravityOnAttach=1` (10.0). Whether that reaches the walk under our velocity is open.
+- **The rope (`grapple_rope_swing`, `grapplerope_logic.h`):**
+  - **Catch:** the walk call (the climbing hands' hook) is where it catches. On the call where the game's state enters 3 with a
+    hook point, the rope starts. Its length is the hands' (feet + 1.3 m) distance to the hook. The velocity is the feet's, measured.
+  - **Each call (`RopeStep`):**
+    - Gravity, while the walk says the body is in the air.
+    - The trigger's pull: an acceleration along the rope up to `grapple_pull_mps`, reached in about 0.4 s. It never sets the
+      velocity, so the swing is kept and a shortening rope speeds it up.
+    - Slack is reeled in, down to 1 m.
+    - A taut rope removes the outward speed, and pulls a body found past the length back at 6 /s of the excess.
+    - Walls: three calls in a row where the body moved under half the sideways speed it was sent, and the rope adopts what the
+      body really did (`WallCheck`).
+  - **Vertical:** run 15 showed the walk runs its own vertical in the air. The rope steers the walk's vertical speed (`+0x260`,
+    the channel a launch's rise uses) from the feet: lift += 0.6 × (wanted − measured), kept at 0 or more.
+    - **Unproven:** it can slow a fall or lift, but cannot push down faster than gravity. A rope rarely needs that.
+  - **Let go (`RopeEndCheck`):**
+    - The jump button (A).
+    - Landing, but only after air time: a rope caught standing is a leash.
+    - The hands within 1.2 m of the hook.
+    - A new catch.
+    - A climb starting.
+    - 120 s.
+    - On let go, the game's rope leaves group 24 (`+B9F4F0`, the zipline's exit). The momentum is handed on like a launch's
+      (`HandOffVelocity`: the post path and the air carry).
+  - **Limit:** it needs `climb_by_hand`, because that installs the walk hook and the velocity calls.
+- **The skill (`grapple_unlock_skill`, bootstrap `skillpatch.cpp`):**
+  - **Why this route:** the engine opens data by bare name, through filesystem_x64_rwdi's open exports (the early_eye_size log),
+    and a loose `DW\` file resolves by that name.
+  - **What it does:**
+    - At attach, it reads the game's own `data/skills/common_skills.xml` from the newest `DW\DataN.pak` holding it.
+    - It removes StatusHook's `level_req` and sets its cost to 0 (`PatchHookSkill`; checked against this install's Data0: one
+      requirement removed, 29,701 → 29,660 bytes).
+    - It writes `DW\dlvr_common_skills.xml`. pakgen's open hooks, now installed for either feature, hand the engine that name.
+      A failed redirected open falls back to the original.
+  - **Result:** the skill is taken in the menu at any rank for free. That runs the game's own reward, which gives the hook item
+    and its tutorial. No pak is written.
+- **Log lines:**
+  - `ROPE #n CAUGHT`, `ROPE #n TRACE` (the first 6 ropes, every 100 ms): the game's state, its vector against ours, the
+    measured feet, the lift, the rope.
+  - `ROPE #n LET GO`.
+  - `ROPE NOT CAUGHT`: the game's pull ran 300 ms and no walk call took it.
+  - The P7 counts in the 5 s line.
+  - `[SKILLPATCH] ... REDIRECTED` in dlvr_bootstrap.log.
+- **Open for the headset:**
+  - Does the walk call run during the game's pull (CAUGHT vs NOT CAUGHT)?
+  - Does the measured vertical follow ours (TRACE)?
+  - Does the game's rope stay drawn while we swing, or end itself (its state in TRACE)?
+  - Is the redirected `common_skills.xml` the one the skill menu shows?
+- **Run 1 (2026-11-28 17:01):** "works pretty well. The unlock works as well." The TRACE lines show the measured feet tracking the
+  rope's velocity within ~10 %, the vertical included.
+
+### 8.22 P7 round 2 (2026-11-28): the left trigger holds, the right trigger pulls, momentum on letting go [BIN + CODE]
+
+- **The asks:** "make the pull be with right trigger. So pressing and holding left trigger is what launches the hook and makes
+  you swing (and you don't stop swinging until you release the left trigger, remove the game's default automatic timeout dropoff
+  with this setting on)" / "Make sure that the swing's momentum carries into the walk state when releasing the hook, as it
+  currently doesn't."
+- **`grapple_hold_to_swing` (default on):**
+  - The rope lets go only when the left trigger drops under 0.3 (`RopeEndCheck` hold mode). The jump button, landing, reaching
+    the hook and the 120 s net no longer end it. A rope pulled all the way in hangs at 1 m.
+  - The right trigger is the pull. While the rope holds, the game's R2 reads 0 (`GrappleRopeHoldsR2`, in the pad chain with the
+    other R2 withholds), so a pull is not also an attack.
+- **The drop-off:**
+  - Run 1, rope #2: the game's rope left state 3 about 3 s into a swing, and the walk's landing flag then ended ours.
+  - The pull state's limit is `+0x64` against the time in state `+0x60`, which the dispatcher advances. `+D78E8C`: `comiss
+    [+0x64],[+0x60]` / `ja` = keep pulling. `+D7A260` seeds `+0x64` (`+D7C0B0`), and `+D78DE9` / `+D79839` raise it.
+  - Hold mode writes 1e6 to `+0x64` on every walk call while the rope holds (one `HELD OFF` line per rope).
+  - A change of the game's rope state while ours holds is logged.
+- **Momentum:**
+  - Run 1, rope #3: `LAUNCH CARRY ended - another controller took the player 0 ms in`. On the first update after letting go, the
+    rope controller still had the walk, and the carry only runs under MoveController.
+  - Now letting go starts a free flight (`FreeStep`: the rope's last velocity, gravity, the vertical lift). It lasts until
+    MoveController has the walk, the walk is on the ground, or 600 ms pass. Only then is the momentum handed to the carry
+    (`MOMENTUM HANDED ON` line).
+- **Open for the headset:**
+  - Does the game keep drawing the rope past the old 3 s?
+  - Does holding L2 for the whole swing make the game do anything of its own (a re-throw)? The state-change lines would show it.
+
+### 8.23 P7 round 3 (2026-11-28): the aiming, grappling and pull hands [CODE]
+
+- **The ask:** three settings in the grappling hook section. "Aiming hand: changes which hand aims the reticle and where the hook
+  will launch. Grappling hand: changes which trigger shoots the hook. Pull hand: changes which trigger causes the hook to pull if
+  enabled."
+- **`grapple_aim_hand` (default right):**
+  - grappleaim's `PointHook` reads the chosen hand's steadied pose (the A2 origin).
+  - `ComputeAbsoluteAim` takes a hand (default right, so the shot paths are unchanged).
+  - The 3D reticle sits on the game's target, which that ray makes.
+  - `grapple_aim_from_gun`'s barrel line is unchanged.
+- **`grapple_hand` (default left):**
+  - The game throws on L2. With the right hand chosen, the game's L2 and R2 bytes trade places while the hook is the selected
+    item or a rope holds: the right trigger throws, the left attacks.
+  - This is done by `GrapplePadSwap`, the first trigger rule in the pad chain.
+  - "Hook selected" is throwable.cpp's item read (`ThrowableHookSelected`). It needs `throwable_hand_enable`, which is on by
+    default.
+  - In hold mode, the grappling trigger is the one that holds the rope.
+- **`grapple_pull_hand` (default right):**
+  - The pull reads this trigger.
+  - When it is not the grappling hand, it always lands on the game's R2 (swapped or not), and that byte is withheld while a rope
+    holds (`WithholdR2`).
+  - The same hand for both, in hold mode: held part way it swings, squeezed past 0.95 it pulls (`PullThreshold`).
+- **Open for the headset:** the right grappling hand's swap (the throw, the attack on the left trigger).
+
+### 8.24 P7 round 4 (2026-11-28): the game's rope no longer ends itself under a held rope [BIN + CODE]
+
+- **The report:** "the game does drop me out of the grappling hook mode after a few seconds ... when I finally release the trigger,
+  I'm moved to where the grappling hook latched and dropped from there". Then: "letting go at the hook point it's okay, but touching
+  surfaces shouldn't force the drop, neither should the timeout".
+- **Run 17:29 (ropes #2-#8):** with the time limit held off, the game's rope still left state 3 after 1-7 s: near the hook (#2, the
+  hands 1.35 m away) or on touching the ground (#3).
+  - After that MoveController had the walk. The rope's vertical went unheard: the lift hit its cap and the feet fell at -12 m/s
+    while the rope asked +40.
+  - On release that +40 m/s was handed on as a launch. That was the trip to the hook point.
+- **The end block [BIN]:** `+D78C80` enters its end at `+D79AD1` (`je` → `+D79E9A` = no end this update) when `+0x248` (the time limit,
+  `+D78EC2`) or r12b is set.
+  - r12b is set by the arrival (`+D794CA`: the body within a data distance of the pull target `+0x6C`) or by the contact test
+    (`+D79843`..`+D79A9C`: a contact in `+0x180` / `+0x188` facing against the pull).
+  - The block sets state 4 or 5, or jumps off the walk (`+D79E6A`).
+- **The change:**
+  - While a hold-mode rope holds (`KeepGameRopeOn`), that `je` becomes `jmp +D79E9A`. It is restored on letting go.
+  - Both 6-byte forms sit in the aligned qword `+D79AD0`, swapped by one compare-exchange. The bytes are checked at install.
+  - Reaching the hook is ours now: hold mode lets go with the hands within 1.2 m of the hook (`RopeEndCheck`).
+  - The net: if the game's rope leaves its pull anyway, ours lets go at once (`kReGameEnded`, either mode). It hands on the feet's
+    measured velocity, not the rope's (`LetGoVelocity`).
+- **Open for the headset:**
+  - Does a long swing with ground or wall contact hold?
+  - Does reaching the hook let go cleanly over a ledge?
+  - Does the game keep drawing the rope?
+
+### 8.25 Round 6 (2026-11-28): the pole jump's direction, the hook's view turn, the view after a climb-up [BIN + CODE]
+
+- **"The first jump [from a pole or ladder] in the game, regardless of where I'm looking, is always upwards":**
+  - Run 17:45 has three pole jumps against the same direction (0.85, −0.52): the ledge made at the grab (feet → the surface then).
+    The first two measured the look 8° from it, so both went up.
+  - The direction is now measured at the jump, from the feet to where the hands hold (`JumpInto`). Ledges keep the wall's direction.
+  - The JUMP BUTTON line now prints the look, the direction and its source. If the first jump still goes up, the line shows
+    whether the look or the direction is wrong.
+- **"When shooting the grappling hook, the game moves my view to look at the hook point":**
+  - **[BIN]** `+BA0F70` picks the look owner. It walks the player's controllers in priority order and keeps the last one whose
+    vfunc `+0xE0` returns an ILookController.
+  - The rope's getter (`+17310D8` slot 28 = `+D7E160`) returns its own look interface (`this+24`) in states 4 / 5, or while a look
+    target is set (`+0xC4` / `+0xC8`). That interface sets the look toward the hook (boneblend INV-272).
+  - With `grapple_rope_swing` (and `climb_by_hand`), the slot is swapped at install (its old value checked). The local player's rope
+    answers null, so LookController keeps the look. Other players' ropes pass through.
+- **"Freezing the body after the mantle animation was the wrong fix, now I often clip through my body or my head is above it, and
+  it fixes after a second or so":**
+  - **[MEASURED] The cause was the view, not the body.** Run 17:45, climb-ups #1–#4: every tail that timed out had the game's head
+    ~25–27 cm off the "standing eye point", with that head at 156–158 cm. So the remembered point was ~131 cm. The hang's own
+    standing base was 168.8 cm.
+  - The rigid view held the camera there, ~37 cm low inside the body, until the 1.5 s time-out (CAM AFTER: the camera 124 cm over
+    the origin, then 158 cm the moment the tail ended).
+  - A tail that ended early could start again (climb-up #2: ended at 187 ms, then again at 1500 ms), because the head kept rising
+    away from that low point.
+  - **The changes:**
+    - The remembered standing height refuses dips: a value over 5 cm lower is taken only after 10 s of lower values (`StandRefStep`,
+      `STANDING EYE HEIGHT` lines).
+    - The view tail ends once per grab end. It also ends when the game's head has settled (still for 200 ms, at least 300 ms in;
+      `ViewHoldTail` + `ViewTail`).
+    - After a climb-up the body is no longer held on (`BodyHoldTail` with the climb-up flag). The game's stand-up is the body's own.
+      The 0.5 s body tail stays for drops and launches from a hang.
+  - **Left as it is:** the game's stand-up after a cut-short climb-up still takes ~1–1.5 s (its head 124 → 156 cm). Until the view
+    tail ends, the view sits at standing height over that rising body.
+- **Open for the headset:**
+  - Is the clip-through after a mantle gone? Check the RIGID VIEW TAIL lines (SETTLED / near, not TIMED OUT) and the STANDING EYE
+    HEIGHT lines.
+  - Does the hook still turn the view (the refused count in the 5 s line)?
+  - Does the first pole jump follow the look (the JUMP BUTTON line's direction source)?
 
 ---
 

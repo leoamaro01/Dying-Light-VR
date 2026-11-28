@@ -20,7 +20,14 @@ namespace dlvr::launcher {
 
 // The GitHub repo's API URL for its latest release - the ONE place it is set (spec 12.1; repo created 2026-11-15, PRIVATE at
 // first: until it is public the API answers 404 to the launcher, which does not sign in, and CheckForUpdates says so).
-inline const char* kRepoUrl = "https://api.github.com/repos/bymodify-ux/Dying-Light-VR/releases/latest";
+// Fork 2026-11-28: the "owner/name" part comes from the CMake cache variable DLVR_UPDATE_REPO (passed as a compile
+// definition to the launcher target only), so a fork can build a launcher that installs and updates from its own
+// releases without editing this file. Undefined (tests, other targets) = upstream, which keeps the public launcher's
+// behaviour and the test's expected URL unchanged.
+#ifndef DLVR_UPDATE_REPO
+#define DLVR_UPDATE_REPO "bymodify-ux/Dying-Light-VR"
+#endif
+inline const char* kRepoUrl = "https://api.github.com/repos/" DLVR_UPDATE_REPO "/releases/latest";
 
 inline const char* kPreviousDir = "dlvr/previous/";
 

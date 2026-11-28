@@ -15,6 +15,8 @@
 
 #include <cstdint>
 
+#include "controllers.h"   // Hand (ComputeAbsoluteAim's hand)
+
 namespace dlvr {
 
 // Off by default. The hook always logs the game's own original vector
@@ -78,7 +80,8 @@ void AimHeadSmoothUpdate();
 // Shared by the gun redirect and the grapple (grappleaim.cpp, R9) so the two can
 // never disagree on the mapping. False = no pose / degenerate heading: leave the
 // game's value alone.
-bool ComputeAbsoluteAim(float origX, float origY, float origZ, float out[3]);
+// hand (grapple_aim_hand, 2026-11-28): the controller whose direction is mapped; the shot paths keep the right hand.
+bool ComputeAbsoluteAim(float origX, float origY, float origZ, float out[3], Hand hand = kRightHand);
 
 bool AimHookInstall();
 void AimHookUninstall();

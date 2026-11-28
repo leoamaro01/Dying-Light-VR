@@ -2719,15 +2719,24 @@ void DrawHudTab()
 void DrawParkourTab()
 {
     struct Section { const char* heading; const char* id; const char* const* keys; int n; };
-    static const char* const kGrab[] = { "climb_reach_m", "climb_catch_ms", "climb_always_hang", "climb_hang_min_m" };
+    static const char* const kGrab[] = { "climb_reach_m", "climb_catch_ms", "climb_always_hang", "climb_hang_min_m",
+                                         "climb_skip_grab_anim", "climb_grab_move_mps", "climb_room_check",
+                                         "climb_ladder_by_hand", "climb_slide_mps", "climb_slide_grip", "climb_zipline_by_hand" };
     static const char* const kHang[] = { "climb_hand_motion", "climb_pull_max_mps", "climb_release_m", "climb_pin_hands",
                                          "climb_body_follows_view", "climb_view_rigid", "climb_hold_body", "climb_view_smooth", "climb_stick_shimmy" };
-    static const char* const kUp[] = { "climb_mantle_stick", "climb_mantle_auto", "climb_mantle_m", "climb_ledge_last" };
-    static const char* const kLaunch[] = { "climb_launch_min_mps", "climb_launch_scale", "climb_launch_up_assist",
-                                           "climb_air_momentum", "climb_air_momentum_all", "climb_air_control", "climb_air_drag" };
+    static const char* const kUp[] = { "climb_mantle_stick", "climb_fast_climb_up", "climb_skip_reach", "climb_mantle_auto",
+                                       "climb_mantle_m", "climb_ledge_last" };
+    static const char* const kLaunch[] = { "climb_jump_by_look", "climb_jump_side_deg", "climb_launch_min_mps", "climb_launch_scale",
+                                           "climb_launch_up_assist",
+                                           "climb_air_momentum", "climb_air_momentum_all", "climb_air_control_pct", "climb_air_drag" };
     static const char* const kLow[] = { "climb_auto_low", "climb_auto_low_m" };
+    static const char* const kRope[] = { "grapple_rope_swing", "grapple_aim_hand", "grapple_hand", "grapple_pull_hand",
+                                         "grapple_trigger_pull", "grapple_hold_to_swing", "grapple_pull_mps", "grapple_unlock_skill" };
     static const char* const kDebug[] = { "diag_climb_probe" };
-    static const char* const kTop[] = { "climb_by_hand" };
+    // hide_game_crosshair (2026-11-28): not a climb setting, but filed on this tab at the tester's request - drawn under the master
+    // switch, outside the climb sections.
+    static const char* const kTop[] = { "climb_by_hand", "hide_game_crosshair" };
+    constexpr int kTopN = static_cast<int>(sizeof(kTop) / sizeof(kTop[0]));
     static const Section kSections[] = {
         // (counts from the arrays: the hang list said 6 while holding 7, so climb_stick_shimmy was never drawn in its section)
         { "Grabbing ledges", "pk_grab", kGrab, static_cast<int>(sizeof(kGrab) / sizeof(kGrab[0])) },
@@ -2735,6 +2744,7 @@ void DrawParkourTab()
         { "Climbing up", "pk_up", kUp, static_cast<int>(sizeof(kUp) / sizeof(kUp[0])) },
         { "Launching off", "pk_launch", kLaunch, static_cast<int>(sizeof(kLaunch) / sizeof(kLaunch[0])) },
         { "Low walls", "pk_low", kLow, static_cast<int>(sizeof(kLow) / sizeof(kLow[0])) },
+        { "Grappling hook", "pk_rope", kRope, static_cast<int>(sizeof(kRope) / sizeof(kRope[0])) },
         { "Debug", "pk_debug", kDebug, static_cast<int>(sizeof(kDebug) / sizeof(kDebug[0])) },
     };
     const auto in = [](const char* key, const char* const* keys, int n) {
@@ -2745,7 +2755,7 @@ void DrawParkourTab()
     const Setting* all = AllSettings(count);
     const auto mine = [](const Setting& st) { return !st.locked && TabForSetting(st) == Tab::Parkour; };
     for (int i = 0; i < count; ++i) {   // the master switch, outside any section
-        if (mine(all[i]) && in(all[i].key, kTop, 1)) { DrawOneSetting(all[i], i); }
+        if (mine(all[i]) && in(all[i].key, kTop, kTopN)) { DrawOneSetting(all[i], i); }
     }
     const auto section = [&](const char* heading, const char* id, auto pick) {
         bool any = false;
@@ -2761,7 +2771,7 @@ void DrawParkourTab()
         section(s.heading, s.id, [&](const Setting& st) { return in(st.key, s.keys, s.n); });
     }
     section("Other", "pk_other", [&](const Setting& st) {
-        if (in(st.key, kTop, 1)) { return false; }
+        if (in(st.key, kTop, kTopN)) { return false; }
         for (const Section& s : kSections) { if (in(st.key, s.keys, s.n)) { return false; } }
         return true;
     });

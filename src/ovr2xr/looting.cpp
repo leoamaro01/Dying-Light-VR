@@ -25,6 +25,7 @@
 #include "camhook.h"        // CamHookGetOpenXrToGameYaw, CamHookGetRenderedViewMatrix
 #include "controllers.h"
 #include "headpose.h"       // GetHeadPose, NeckPivotReportedPos
+#include "climbhand.h"      // ClimbHandHidesPrompt - the ladder's use prompt hidden in hand mode (climb_ladder_by_hand)
 #include "camogesture.h"    // CamoGesturePadPoll - the camouflage wipe, beside body grab's hand publish
 #include "looting_logic.h"
 #include "lidhand.h"        // LidHandOnNearby - hand-open lids publish / null pick inside NearbyHook (trace 20261118_1711)
@@ -1294,6 +1295,10 @@ bool SetGripGlyph(uintptr_t s, uint32_t* presetOut, uintptr_t* elOut)
 
 void __fastcall SlotUpdateHook(void* slot, void* trigger)
 {
+    // P5 (climb_ladder_by_hand): a ladder / pipe / rope offers the game's own ladder climb, which hand mode refuses - its prompt is
+    // updated as if nothing were targeted; P6 (climb_zipline_by_hand) the same for the zipline's prompt (the game's own null-trigger path, which this hook already sees), so neither the HUD
+    // prompt nor the in-world copy (PromptQuadOnSlot, skipped below on null) shows.
+    if (ClimbHandHidesPrompt(trigger)) { trigger = nullptr; }
     ++t_inSlotUpdate;   // the camouflage hide applies only to the action queries made inside this call (CamoOfferHook)
     g_origSlot(slot, trigger);
     --t_inSlotUpdate;

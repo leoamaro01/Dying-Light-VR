@@ -15,6 +15,7 @@
 #include "camhook.h"        // CamHookGetRenderedViewMatrix - fire_reticle_3d's camera frame
 #include "controllers.h"
 #include "headpose.h"
+#include "xhair_hide_logic.h"   // hide_game_crosshair - park vs restore when no VR use of the crosshair is active
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -75,6 +76,12 @@ namespace dlvr {
 //      the hook changes nothing unless the call returns to gamedll+0xD760AB. HEADSET: needs the right-controller
 //      pose (a flat run only proves the install line).
 bool GrappleHandAim = true;   // DEFAULT ON 2026-10-01 (Jay: Tier B ships on)
+// [DEP: grapple_aim_hand] required-for=aiming the grapple with either hand (GrappleAimHand; tester 2026-11-28: "Aiming hand: changes
+//      which hand aims the reticle and where the hook will launch"). 0 = left, 1 = right (controllers.h Hand). The hand-aim ray
+//      (PointHook's direction through ComputeAbsoluteAim, and its origin for A2) and the aim probes read this hand. The 3D reticle sits
+//      on the game's own target, which that ray makes. grapple_aim_from_gun's barrel line is unchanged. DEFAULT 1 (right).
+int  GrappleAimHand = 1;
+static Hand AimHand() { return GrappleAimHand == 0 ? kLeftHand : kRightHand; }
 // [DEP: grapple_hand_origin] required-for=R9 round 2 A2 - the grapple ray (and the ledge assist) start at the HAND
 //      (GrappleHandOrigin). tree=INERT. Was DEFAULT OFF. Detours gamedll+0xD7D630 (byte-verified 16-byte prologue);
 //      substitutes only for returns to +D760B7 / +D7DA4E, and only while grapple_hand_aim redirected this call.
@@ -91,6 +98,15 @@ bool GrappleCrosshairMarker = false;
 //      "on" a roof the grapple would not take; on a miss it is drawn at the ray's END, 25 m on) (GrappleMarkerHideOnMiss).
 //      tree=INERT. Was DEFAULT OFF. Needs grapple_crosshair_marker=1. HEADSET.
 bool GrappleMarkerHideOnMiss = true;   // DEFAULT ON 2026-10-01 (Jay: Tier B ships on; inert while grapple_crosshair_marker=0)
+// [DEP: hide_game_crosshair] required-for=the game's centre crosshair kept off the screen whenever no VR use of it is active
+//      (tester 2026-11-28: "doesn't really do anything at all in VR, it's just bothersome in the middle of the screen")
+//      (HideGameCrosshair). tree=INERT. DEFAULT OFF. LIVE. No hook of its own: rides the HudCrosshair slot-178 hook
+//      (CrosshairHook), and on every path that used to put the group back at its layout spot (no gun bore / bow, no fresh
+//      grapple marker) PARKS it off-screen instead (xhair_hide_logic.h). The VR uses keep priority: fire_reticle_3d /
+//      bow_reticle_3d (their 3D reticle) and grapple_crosshair_marker (the dot follows the hand ray). The grapple's own icon
+//      (HudRopeReticle) is a different element and is not touched. The hook installs at startup if this OR fire_reticle_3d OR
+//      grapple_crosshair_marker is on - with fire_reticle_3d on (the default) turning this on takes effect at once. HEADSET.
+bool HideGameCrosshair = false;
 // (fire_reticle_from_barrel - the gun reticle as the flat HUD dot: REMOVED 2026-10-07, audit section 2; fire_reticle_3d
 //  replaced it.)
 // [DEP: fire_reticle_3d] required-for=the gun reticle as a 3D marker in the headset, not the flat HUD dot (Jay 2026-09-28:
@@ -723,13 +739,14 @@ float* __fastcall PointHook(void* cam, float* out, float x, float y)
     orig[0] /= ol; orig[1] /= ol; orig[2] /= ol;
     XrPosef ctl;
     // Steadied (comfort_hand_steady, C1): the grapple's hand aim, the same "aim with a still hand" job as a shot.
-    if (!GetControllerPoseSteady(kRightHand, ctl)) {
+    // grapple_aim_hand: the chosen hand (right by default) - its pose here (the A2 origin) and its direction below.
+    if (!GetControllerPoseSteady(AimHand(), ctl)) {
         InterlockedIncrement(&g_refNoPose);
         MaybeLogWindow();
         return r;
     }
     float aim[3];
-    if (!ComputeAbsoluteAim(orig[0], orig[1], orig[2], aim)) {
+    if (!ComputeAbsoluteAim(orig[0], orig[1], orig[2], aim, AimHand())) {
         InterlockedIncrement(&g_refMapping);
         MaybeLogWindow();
         return r;
@@ -1085,7 +1102,7 @@ void ThrowEvent(void* ctrl)
     }
     float handTurn = -1.0f;
     XrPosef nowPose;
-    if (c.valid && GetControllerPose(kRightHand, nowPose)) {
+    if (c.valid && GetControllerPose(AimHand(), nowPose)) {
         float fx, fy, fz;
         RotateByQuat(nowPose.orientation, 0.0f, 0.0f, -1.0f, fx, fy, fz);
         float cs = fx * c.ctlFwd[0] + fy * c.ctlFwd[1] + fz * c.ctlFwd[2];
@@ -3092,6 +3109,42 @@ char __fastcall CrosshairHook(void* self)
     return r;
 }
 
+// hide_game_crosshair (2026-11-28): every path of CrosshairHookBody that has no VR use for the game's crosshair this update ends
+// here. Setting off = the behaviour before it (put the group back at its layout spot once if it was moved); on = parked far
+// off-screen, the same parking the 3D reticles use (no visibility-state change - HudCrosshair owns that). Re-parked each update
+// while hidden, as the 3D reticles do. Returns true only when it put the group back (the grapple-marker path counts restores).
+volatile LONG g_xhHideSaid = 0;
+bool IdleCrosshair(void* self)
+{
+    switch (xhairhide::DecideIdle(HideGameCrosshair, g_xhMoved)) {
+    case xhairhide::IdleAction::Park: {
+        float off[4] = { g_xhLayout[0] - 100000.0f, g_xhLayout[1] - 100000.0f, g_xhLayout[2], 0.0f };
+        __try {
+            g_setRel(self, off);
+            g_xhMoved = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            InterlockedIncrement(&g_xhFault);
+            return false;
+        }
+        if (InterlockedCompareExchange(&g_xhHideSaid, 1, 0) == 0) {
+            LOG("grappleaim: hide_game_crosshair: FIRST PARK (logged once) - the game's centre crosshair %p leaves the screen while "
+                "no VR use of it is active (layout spot (%.1f, %.1f) kept for when the setting is turned off) | fire_reticle_3d=%d "
+                "bow_reticle_3d=%d grapple_crosshair_marker=%d keep their own placement",
+                self, g_xhLayout[0], g_xhLayout[1], FireReticle3d ? 1 : 0, BowReticle3d ? 1 : 0, GrappleCrosshairMarker ? 1 : 0);
+        }
+        return false;
+    }
+    case xhairhide::IdleAction::Restore: {
+        const bool ok = RestoreMarker(self);
+        g_xhMoved = false;
+        return ok;
+    }
+    case xhairhide::IdleAction::None:
+        break;
+    }
+    return false;
+}
+
 char CrosshairHookBody(void* self)
 {
     const char r = g_trueXhair(self);
@@ -3101,7 +3154,11 @@ char CrosshairHookBody(void* self)
     if (DiagMoveBob) {
         MoveBobTick();      // COST: a few seqlock reads + small vector maths per HUD update; 6 lines per 5 s at most
     }
-    if (!GrappleCrosshairMarker && !FireReticle3d) {
+    if (!xhairhide::HookActive(GrappleCrosshairMarker, FireReticle3d, HideGameCrosshair)) {
+        // Everything off (live): a group a mode left moved / parked goes back once, then nothing more is written.
+        if (g_xhMoved && g_xhElem == self) {
+            IdleCrosshair(self);
+        }
         return r;
     }
     if (g_xhElem != self) {   // first sight of this HUD element (or a new one after a HUD reload): its layout spot
@@ -3122,10 +3179,7 @@ char CrosshairHookBody(void* self)
             return r;
         }
         if (g == 2) {
-            if (g_xhMoved) {
-                RestoreMarker(self);
-                g_xhMoved = false;
-            }
+            IdleCrosshair(self);   // hide_game_crosshair: parked; else back at its spot if it was moved
             return r;
         }
         // g == 1 (no gun bore): the bow (INV-496). COST: one seqlock read when no bow is held; while drawn <= 16 casts.
@@ -3137,19 +3191,13 @@ char CrosshairHookBody(void* self)
                 return r;
             }
             if (b == 2) {
-                if (g_xhMoved) {
-                    RestoreMarker(self);
-                    g_xhMoved = false;
-                }
+                IdleCrosshair(self);
                 return r;
             }
         }
     }
     if (!GrappleCrosshairMarker) {
-        if (g_xhMoved) {
-            RestoreMarker(self);
-            g_xhMoved = false;
-        }
+        IdleCrosshair(self);   // no gun / bow reticle and no grapple marker: the plain centre crosshair (hidden by the setting)
         return r;
     }
     float hit[3], centre[3];
@@ -3177,12 +3225,10 @@ char CrosshairHookBody(void* self)
         return r;
     }
     if (!fresh) {
-        if (g_xhMoved) {
-            if (RestoreMarker(self)) { InterlockedIncrement(&g_xhRestores); }
-            g_xhMoved = false;
-        } else if (tick != 0) {
+        if (!g_xhMoved && tick != 0) {
             InterlockedIncrement(&g_xhStale);
         }
+        if (IdleCrosshair(self)) { InterlockedIncrement(&g_xhRestores); }
         return r;
     }
     float np[4] = {}, ph[4] = {}, pc[4] = {};
@@ -3200,10 +3246,7 @@ char CrosshairHookBody(void* self)
         }
     } else {
         InterlockedIncrement(res == 1 ? &g_xhBehind : &g_xhFault);
-        if (g_xhMoved) {
-            RestoreMarker(self);
-            g_xhMoved = false;
-        }
+        IdleCrosshair(self);
     }
     return r;
 }
@@ -3657,10 +3700,10 @@ void InstallMarker(HMODULE gd, HMODULE eng)
     InterlockedExchange(&g_markerLive, why ? 0 : 1);
     // [PROBE: GRAPPLEAIM] gate=grapple_crosshair_marker  site=FLAT  log-only=yes
     LOG("grappleaim: [GRAPPLEAIM] A3 crosshair marker: %s%s | modes: grapple_crosshair_marker=%d "
-        "fire_reticle_3d=%d (fire_aim_from_barrel=%d%s) | camera left/up exports %s | Raytrace IAT original %p (filter "
+        "fire_reticle_3d=%d hide_game_crosshair=%d (fire_aim_from_barrel=%d%s) | camera left/up exports %s | Raytrace IAT original %p (filter "
         "return +%llX) | HudCrosshair vt +%llX slot %d (was +%llX) | projection +%llX",
         why ? "*** NOT INSTALLED - " : "INSTALLED - the centre crosshair hook is live",
-        why ? why : "", GrappleCrosshairMarker ? 1 : 0, FireReticle3d ? 1 : 0,
+        why ? why : "", GrappleCrosshairMarker ? 1 : 0, FireReticle3d ? 1 : 0, HideGameCrosshair ? 1 : 0,
         FireAimFromBarrel ? 1 : 0,
         (FireReticle3d && !FireAimFromBarrel) ?
             " - *** the gun reticle NEVER shows: no bore is published ***" : "",
@@ -3775,7 +3818,7 @@ bool GetGunDot(GunDot& out)
 void GrappleAimInstall()
 {
     if (!(GrappleHandAim || GrappleHandOrigin || GrappleCrosshairMarker || FireReticle3d ||
-          Grapple3dReticle) || g_tried) {
+          Grapple3dReticle || HideGameCrosshair) || g_tried) {
         return;
     }
     HMODULE gd  = GetModuleHandleA("gamedll_x64_rwdi.dll");
@@ -3806,8 +3849,8 @@ void GrappleAimInstall()
             InstallOrigin(gd);
         }
     }
-    if (GrappleCrosshairMarker || FireReticle3d) {
-        InstallMarker(gd, eng);
+    if (xhairhide::HookActive(GrappleCrosshairMarker, FireReticle3d, HideGameCrosshair)) {
+        InstallMarker(gd, eng);   // the HudCrosshair hook (hide_game_crosshair rides it too)
     }
     if (FireReticle3d) {
         InstallCrowdGuard(gd);   // before any HUD update can choose BulletCast (g_crowdGuardLive starts 0 = GunCast)

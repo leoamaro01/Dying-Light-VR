@@ -189,6 +189,7 @@ void* volatile g_localCtrl     = nullptr;
 volatile LONG  g_cancelPending = 0;
 volatile LONG  g_releasePend   = 0;
 volatile LONG  g_holdsL2       = 0;
+volatile LONG  g_hookSel       = 0;   // the grappling hook is the selected item (ThrowableHookSelected; pad thread writes)
 volatile LONG  g_busy          = 0;         // ruling R24: the decision is not Idle (incl. a cancel wait)
 void* volatile g_localPlayer   = nullptr;   // route 1 PlayerDI as read on the latest armed poll
 volatile LONG  g_selType       = -1;        // the selected throwable's ItemType (-1 = none / not a throwable)
@@ -570,6 +571,7 @@ void ThrowablePadByte(unsigned char* p)
         if (g_localCtrl) { g_localCtrl = nullptr; }
         if (g_localPlayer) { g_localPlayer = nullptr; }
         if (g_selType != -1) { InterlockedExchange(&g_selType, -1); }
+        if (g_hookSel) { InterlockedExchange(&g_hookSel, 0); }
         if (g_holdsL2) { InterlockedExchange(&g_holdsL2, 0); }
         if (g_releasePend) { InterlockedExchange(&g_releasePend, 0); }
         if (g_busy) { InterlockedExchange(&g_busy, 0); }
@@ -656,6 +658,10 @@ void ThrowablePadByte(unsigned char* p)
     // are switched is still not read - the vehicle state is the established signal, not the layout switch itself.)
     const bool thrSelected = why == 0 && gr.ctrl != 0 && !g_evalFault && g_evalRaw == gr.rawItem && g_evalThr != 0 &&
                              g_evalThr == gr.rawItem && g_evalType != static_cast<int>(kTypeHook) && !gr.inVehicle;
+    // grapple_hand (climbhand.cpp P7 round 3): the same reads, the hook's side - the grappling hook is the selected item, on foot.
+    const bool hookSel = why == 0 && !g_evalFault && g_evalRaw == gr.rawItem && g_evalThr != 0 && g_evalThr == gr.rawItem &&
+                         g_evalType == static_cast<int>(kTypeHook) && !gr.inVehicle;
+    if ((g_hookSel != 0) != hookSel) { InterlockedExchange(&g_hookSel, hookSel ? 1 : 0); }
 
     // ---- the hands ----
     throwable::Input in{};
@@ -1772,6 +1778,11 @@ bool ThrowableReleasePending()
 bool ThrowableHoldsL2()
 {
     return g_holdsL2 != 0;
+}
+
+bool ThrowableHookSelected()
+{
+    return g_hookSel != 0;
 }
 
 bool ThrowableBusy()

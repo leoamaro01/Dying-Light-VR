@@ -28,4 +28,8 @@ float PhysCrouchReportLiftY(float headY);
 // panel's lazy follow re-places the panel at the head when it changes (uipanel.cpp; Jay 2026-10-27, option A).
 long PhysCrouchEdges();
 
+// Climbing round 4: hold the game's crouch until this GetTickCount64 tick (climbhand renews it while a crouched climb-up's spot has
+// no standing room). Works with physical crouch on or off. Any thread.
+void PhysCrouchForceUntil(unsigned long long untilMs);
+
 }  // namespace dlvr

@@ -160,6 +160,8 @@ and gate verbose probes behind diagnostic options or `DLVR_BETA_LEAN`.
 - Sync with `git fetch upstream` then `git merge upstream/main`. Work on feature branches and open PRs against the
   fork, or upstream when contributing back.
 - Upstream commit messages follow the pattern `<version>: <comma-separated user-visible changes>`.
-- Releases built from the fork are **not** what the launcher updates to: `kRepoUrl` (and its test in
+- The launcher's download source is the CMake cache variable `DLVR_UPDATE_REPO` (GitHub `owner/name`, default
+  upstream), compiled into `kRepoUrl`. The local `CMakeUserPresets.json` sets it to the fork. Without that override,
+  releases built from the fork are **not** what the launcher updates to: `kRepoUrl` (and its test in
   `tests/launcher_update_test.cpp`) still points at upstream.
 - The repo is GPL-3.0. Credit ported code in `README.md` and `THIRD_PARTY_NOTICES.txt`.

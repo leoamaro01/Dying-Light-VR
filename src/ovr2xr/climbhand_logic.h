@@ -106,6 +106,16 @@ inline bool RefuseClimbUp(bool handMode, bool stickAllowed, bool stickForward, b
 }
 constexpr float              kStickForward    = 0.5f;   // the left stick's y at or past this = pushed forward
 constexpr unsigned long long kStickFreshMs    = 150;    // ...and that reading counts this long (the pad and game threads differ)
+// P4 round 13 (tester 2026-11-27: "I'm still getting automatic mantles from time to time, even though I have both settings
+// disabled"; the log: a grab at a running jump, GRAB END 0 -> 1, and 16 ms later the game's 1 -> 8 passed - the stick was still
+// forward from the run-up). The stick's forward counts only for a push that STARTED after this ledge grab did (pushMs = when the
+// stick last went from not forward to forward, grabMs = the grab's start; 0 = unknown, which never blocks). A stick held from
+// before the grab must be let back and pushed again.
+inline bool StickClimbPush(unsigned long long nowMs, unsigned long long fwdMs, unsigned long long pushMs, unsigned long long grabMs)
+{
+    if (fwdMs == 0 || nowMs < fwdMs || nowMs - fwdMs > kStickFreshMs) { return false; }
+    return pushMs != 0 && pushMs >= grabMs;
+}
 
 // P4 round 2 (tester 2026-11-27, after run 12): "after several physical jumps through sequential vertical ledges, at the top I pressed
 // the stick up to mantle: it moved me back to a lower ledge and shimmied up from it to the next one ... only after several tries it
@@ -135,6 +145,17 @@ inline bool HookMismatch(bool haveHold, const float holdMid[3], const float hold
     return (holdInto[0] * hookDir[0] + holdInto[2] * hookDir[2]) / (la * lb) < kStaleCos;
 }
 
+// P4 round 14 (run 18 climb #9: three stick-ups on the top of four stacked ledges each shimmied up from one ledge higher): the ledge
+// grab keeps its OWN copy of the ledge point (eg+0x4C, +D16690) beside the player's (+0x14C8), and its stick-up starts from the copy.
+// A re-target writes the player's, so that one alone reads "the same" afterwards. Stale = either is not the held ledge (the copy is
+// compared with the player's direction; an unread copy is not a mismatch).
+inline bool HeldStale(bool haveHold, const float holdMid[3], const float holdInto[3], bool haveHook, const float hookMid[3],
+                      const float hookDir[3], bool haveCopy, const float copyMid[3])
+{
+    return HookMismatch(haveHold, holdMid, holdInto, haveHook, hookMid, hookDir) ||
+           HookMismatch(haveHold, holdMid, holdInto, haveHook && haveCopy, copyMid, hookDir);
+}
+
 // What hand mode does with a move the GAME asks for from a hold state (its set-state, StateHook). stickShimmy = climb_stick_shimmy
 // (the game's own shimmy states 11-15 from the stick; tester: "a setting to remove the original game functionality and only leave
 // joystick forward to mantle"), stickClimb = climb_mantle_stick, stickForward = the stick is pushed forward now, ours = our own
@@ -162,15 +183,26 @@ inline bool HookMismatch(bool haveHold, const float holdMid[3], const float hold
 // even when it was already right (the same ledge: no visible change). HookMismatch stays for the log.
 enum GameMoveVerdict : int { kGmPass = 0, kGmRefuse = 1, kGmRetarget = 2 };
 constexpr unsigned long long kRetargetHoldMs = 400;
+// Round 19 (tester 2026-11-27: "if you could remove the animation when it doesn't find a place to shimmy and it can't mantle, that'd
+// also be great, it doesn't make any sense in VR"): skipReach = climb_skip_reach - the reach-up (5 / 9) is refused after the
+// re-target (from the held ledge the game found nothing either), and the hang just stays. Round 20 (tester: "even though it doesn't
+// do any animation, it still leaves me unable to do any actions for a second"; run 22: the reach still ran, 1 -> 9 -> 1 in 0.8 s,
+// with 0 refused): round 19 refused only the stick-up search's own call (+D16639). The stick up then reaches the hang's input
+// handler too (+D19CB5: state 1, its input flag) on the next update, and that handler asks 9 / 4 from +D19D50 / +D19D41. So every
+// 5 / 9 from a hold is refused, whichever call asks. Those two calls are the only ones in the ledge grab that ask them. 4 (the
+// option-bit variant at +D19D41) stays the game's.
 inline int GameMoveFromHang(bool handMode, bool stickShimmy, bool stickClimb, bool stickForward, bool ours, bool held,
-                            bool retargetFresh, int from, int to)
+                            bool retargetFresh, int from, int to, bool skipReach = false, bool pole = false)
 {
     const bool hold = from == 1 || from == 2 || from == 3 || from == 7 || from == 14;   // IsHoldState (defined with P2 below)
     const bool reachUp = to == 5 || to == 9;
     const bool move = to == 8 || (to >= 11 && to <= 15) || reachUp;
     if (!handMode || ours || !hold || !move) { return kGmPass; }
+    // P5 round 1: a hang on a ladder / pole (PoleLedge) has no real ledge - the game's climb-up, shimmies and reach would act on the
+    // made-up one. All refused, no re-target: climbing it is hand over hand.
+    if (pole) { return kGmRefuse; }
     if (held && !retargetFresh) { return kGmRetarget; }
-    if (reachUp) { return kGmPass; }
+    if (reachUp) { return skipReach ? kGmRefuse : kGmPass; }
     if (to == 8) { return RefuseClimbUp(handMode, stickClimb, stickForward, ours, from, to) ? kGmRefuse : kGmPass; }
     return stickShimmy ? kGmPass : kGmRefuse;
 }
@@ -193,6 +225,194 @@ inline int GameMoveFromHang(bool handMode, bool stickShimmy, bool stickClimb, bo
 // still, body-local): the body's own motion carries the view, the headset's arc is added as always, and what the climb animations do
 // to the head never reaches it. RigidRampStep eases it in and out over kRigidRampS (no jump at a climb's start or end): k = the share
 // of the rigid base, 0..1.
+// P4 round 15 (tester 2026-11-27: "mantles seem to always leave me in the air a good half a meter above the floor over the ledge" /
+// "As soon as the animation ends it drops me"; run 19: every climb-up ends with the body's origin on the lip's height, 1-5 cm over the
+// floor, so the lift is inside the climb-up). The game lifts the body's origin over the top to clear the edge and sets it down at the
+// end; the flatscreen view rides the animated head, which stays low, but the rigid view and the root hold ride the origin. While the
+// game's climb-up runs (climbingUp), both are lowered by how far the origin is above the ledge top (lipY), never more than maxM -
+// the view never stands higher than standing on the ledge. 0 otherwise.
+constexpr float kOverLedgeMaxM = 1.0f;
+inline float OverLedgeM(bool climbingUp, float originY, float lipY, float maxM = kOverLedgeMaxM)
+{
+    if (!climbingUp || !(originY == originY) || !(lipY == lipY)) { return 0.0f; }
+    const float d = originY - lipY;
+    return d <= 0.0f ? 0.0f : (d > maxM ? maxM : d);
+}
+
+// Round 16 (run 20: "still mantling too high (but just a bit now, I'd say 10cm or less)"). (1) The lift outlasts the climb-up state:
+// CLIMB-UP #1 ended with the origin 57 cm over the top, and it comes down after. So after the climb-up the lowering goes on (a TAIL)
+// until the origin is down on the top (0) or kOverLedgeTailMs, never growing again (a jump right after is not lowered). (2) Only a
+// climb-up FROM A HANG counts (the previous state a hold state), and the top is the ledge point when it began: run 20's #2 was the
+// game's own climb-over straight from a grab (0 > 8) and read a stale ledge point, 1 m off.
+// Round 17 (run 21, tester 2026-11-27: "now the mantle height is sometimes correct, sometimes too low"; CLIMB-UP #3 / #4 / #5 all
+// timed out with the origin still 4-16 cm over the ledge point: it stood on a floor that much higher than the lip, so that was no
+// lift, and holding it then dropping it at 1.5 s showed as too low, then a snap). The tail now ends when the origin SETTLES: it has
+// not come down more than kOverLedgeSettleM over kOverLedgeSettleMs = the body is on whatever it stands on. The lowering left then
+// (and at the time-out) fades to 0 over kOverLedgeFadeMs instead of switching off - never a jump.
+constexpr unsigned long long kOverLedgeTailMs = 1500;
+constexpr unsigned long long kOverLedgeSettleMs = 150;
+constexpr unsigned long long kOverLedgeFadeMs = 250;
+constexpr float kOverLedgeSettleM = 0.01f;
+struct OverLedgeState {
+    int   prevState = -1;
+    bool  climbing = false, tail = false, fading = false;
+    float lipY = 0.0f, lastM = 0.0f;
+    unsigned long long tailEndMs = 0;
+    float settleY = 0.0f;                 // the origin when it last came down more than kOverLedgeSettleM
+    unsigned long long settleMs = 0;
+    float fadeFromM = 0.0f;
+    unsigned long long fadeStartMs = 0;
+    bool  settled = false;                // the tail ended because the body settled (false: it timed out) - for the log
+};
+enum OverLedgeEvent : int { kOlNone = 0, kOlStarted, kOlClimbEnded, kOlTailEnded };
+inline float OverLedgeStep(OverLedgeState& s, bool active, int state, float originY, float topY, unsigned long long nowMs, int* event)
+{
+    *event = kOlNone;
+    const bool climbingNow = active && (state == 8 || state == 10);
+    const int p = s.prevState;
+    const bool fromHold = p == 1 || p == 2 || p == 3 || p == 7 || p == 14;
+    if (climbingNow && !s.climbing && fromHold) {
+        s.climbing = true; s.tail = false; s.fading = false; s.lipY = topY; s.lastM = 0.0f; s.fadeFromM = 0.0f;
+        *event = kOlStarted;
+    } else if (s.climbing && !climbingNow) {
+        s.climbing = false; s.tail = true; s.fading = false; s.settled = false; s.tailEndMs = nowMs + kOverLedgeTailMs;
+        s.settleY = originY; s.settleMs = nowMs;
+        *event = kOlClimbEnded;
+    }
+    float m = 0.0f;
+    if (s.climbing) {
+        m = OverLedgeM(true, originY, s.lipY);
+    } else if (s.tail && !s.fading) {
+        const float now = OverLedgeM(true, originY, s.lipY);
+        m = now < s.lastM ? now : s.lastM;
+        if (originY == originY && originY < s.settleY - kOverLedgeSettleM) { s.settleY = originY; s.settleMs = nowMs; }
+        const bool settled = nowMs >= s.settleMs + kOverLedgeSettleMs;
+        if (m <= 0.0f) {
+            s.tail = false; m = 0.0f; s.settled = true; s.fadeFromM = 0.0f; *event = kOlTailEnded;
+        } else if (settled || nowMs >= s.tailEndMs) {
+            s.fading = true; s.settled = settled; s.fadeFromM = m; s.fadeStartMs = nowMs;
+        }
+    }
+    if (s.tail && s.fading) {
+        const unsigned long long t = nowMs - s.fadeStartMs;
+        if (t >= kOverLedgeFadeMs) {
+            s.tail = false; s.fading = false; m = 0.0f; *event = kOlTailEnded;
+        } else {
+            m = s.fadeFromM * (1.0f - static_cast<float>(t) / static_cast<float>(kOverLedgeFadeMs));
+        }
+    }
+    s.lastM = m;
+    s.prevState = active ? state : -1;
+    return m;
+}
+
+// Round 18 (tester 2026-11-27: "when I move the joystick up ... it doesn't let me move for 1 or 2 seconds, even if a mantle is
+// successful"; run 21: the game's climb-up from a hang, state 8, always lasts 2.24 s - its timer, +D0A240 8 -> 10 - and the origin is
+// up at the top's height about 1.1 s in; the rest lifts it over the edge and sets it down). [BIN] State 10 is the end: the ledge
+// grab's update (+D09E6C) calls the player's leave (+BB2390(player, 1, 0)) on the first update in it, as it does for the drop (16).
+// So the climb-up can end early with the game's own set-state 10, once the feet (the origin) are at least kFastUpOverM over the top
+// and at least kFastUpInM past the lip along the ledge's inward direction - standing on the top, clear of the edge. Only a climb-up
+// from a hang (fromHang), only in state 8.
+constexpr float kFastUpOverM = 0.05f;
+constexpr float kFastUpInM = 0.35f;
+inline bool FastClimbUpDone(bool on, bool fromHang, int state, const float origin[3], const float lip[3], const float into[3])
+{
+    if (!on || !fromHang || state != 8) { return false; }
+    for (int i = 0; i < 3; ++i) { if (!(origin[i] == origin[i]) || !(lip[i] == lip[i])) { return false; } }
+    const float il = std::sqrt(into[0] * into[0] + into[2] * into[2]);
+    if (!(il > 1e-3f)) { return false; }
+    const float in = ((origin[0] - lip[0]) * into[0] + (origin[2] - lip[2]) * into[2]) / il;
+    return origin[1] >= lip[1] + kFastUpOverM && in >= kFastUpInM;
+}
+
+// Round 4 (tester 2026-11-28): "as soon as we release it (when I end a grab) the body (not my view) shortly moves to under the ledge
+// and quickly comes back" / after a climb-up "my body (this time including my view) moves quickly downwards and then recovers". The
+// holds (root, upper body, rigid view) let go the moment the ledge grab ends, but the game's hang / climb clips are still BLENDING OUT
+// then: the hang clip's root sits toward the ledge (the clip is authored for the game's own hang spot, under the ledge, and the
+// hand-driven body is not there), and the climb-up's end pose is a crouch that stands up (CAM AFTER, 2026-11-28 15:41: the game's head
+// 107 cm over the origin at the end, 150 cm 750 ms later). So each hold keeps a TAIL after the grab ends:
+//   - the body (root + upper body): kBodyTailMs (the blend-out; the hold cannot see the clip's root while it holds it);
+//   - the rigid view: until the game's animated head is back within kViewTailGapM (vertical) of the standing eye point, at most
+//     kViewTailMaxMs - then its usual ease-out.
+// Round 6 (tester 2026-11-28: "freezing the body after the mantle animation was the wrong fix, now I often clip through my body or my
+// head is above it, and it fixes after a second or so"). Run 17:45, climb-ups #1-#4: every tail that timed out had the game's head
+// ~25-27 cm off the "standing eye point" while that head was at 156-158 cm over the feet - the remembered standing point was ~131 cm
+// (the hang's own standing base was 168.8 cm). The rigid view held the camera there, ~37 cm low inside the body, until the 1.5 s
+// time-out; and a tail that ended early (climb-up #2: 187 ms) could start again as the head rose away from that low point. So:
+//   - the tail ends ONCE per grab end (ViewTail.doneFor) and also when the game's head has settled (its height still for
+//     kViewSettleMs: the game's stand-up finished, short of the remembered point or not);
+//   - the remembered standing point refuses dips (StandRefStep);
+//   - after a climb-up the body is not held on (the game's stand-up is the body's own; the hold kept an upright torso over a crouched
+//     pelvis): the body tail is only for a drop / launch from a hang (round 4's swing under the ledge).
+constexpr unsigned long long kBodyTailMs    = 500;
+constexpr unsigned long long kViewTailMaxMs = 1500;
+constexpr float              kViewTailGapM  = 0.08f;
+constexpr unsigned long long kViewSettleMs  = 200;     // the head's height still this long = settled
+constexpr unsigned long long kViewSettleMinMs = 300;   // ... but never before this long after the grab
+constexpr float              kViewSettleStepM = 0.01f; // "still" = moved under this per kViewSettleSampleMs
+constexpr unsigned long long kViewSettleSampleMs = 100;
+inline bool BodyHoldTail(bool hanging, unsigned long long endMs, unsigned long long nowMs, bool endedByClimbUp = false)
+{
+    if (hanging) { return true; }
+    return !endedByClimbUp && endMs != 0 && nowMs >= endMs && nowMs - endMs < kBodyTailMs;
+}
+struct ViewTail {
+    unsigned long long doneFor = 0;    // the grab end (endMs) whose tail has ended - it does not start again
+    unsigned long long refMs = 0;      // the settle test's last sample
+    float              refGap = 0.0f;
+    unsigned long long stillMs = 0;    // how long the gap has been still (summed samples)
+};
+// animGapM = |the standing eye point's height - the game's animated head's| (body-local, m); NaN = unknown (holds to the time-out).
+inline bool ViewHoldTail(ViewTail& t, bool hanging, unsigned long long endMs, unsigned long long nowMs, float animGapM)
+{
+    if (hanging) { t.doneFor = 0; t.refMs = 0; t.stillMs = 0; return true; }
+    if (endMs == 0 || nowMs < endMs || t.doneFor == endMs) { return false; }
+    bool end = nowMs - endMs >= kViewTailMaxMs || animGapM <= kViewTailGapM;
+    if (!end && animGapM == animGapM) {
+        if (t.refMs == 0 || t.refMs < endMs) {
+            t.refMs = nowMs; t.refGap = animGapM; t.stillMs = 0;
+        } else if (nowMs - t.refMs >= kViewSettleSampleMs) {
+            const float step = animGapM - t.refGap;
+            t.stillMs = (step <= kViewSettleStepM && step >= -kViewSettleStepM) ? t.stillMs + (nowMs - t.refMs) : 0;
+            t.refMs = nowMs; t.refGap = animGapM;
+            if (t.stillMs >= kViewSettleMs && nowMs - endMs >= kViewSettleMinMs) { end = true; }
+        }
+    }
+    if (end) { t.doneFor = endMs; return false; }
+    return true;
+}
+// The remembered standing eye height (body-local y, m), refreshed on each accepted standing camera call (boneblend). A value more than
+// kStandDipM under the remembered one is taken only once it has held for kStandLowMs of accepted calls (a dip - a landing, a stumble -
+// does not become "standing"; a real change still does). Returns the height to remember.
+constexpr float              kStandDipM  = 0.05f;
+constexpr unsigned long long kStandLowMs = 10000;
+struct StandRef {
+    bool               have = false;
+    float              y = 0.0f;
+    unsigned long long lowSinceMs = 0;
+    unsigned long long lastLowMs = 0;   // a gap over kStandGapMs between low calls starts the count again
+};
+constexpr unsigned long long kStandGapMs = 500;
+inline float StandRefStep(StandRef& s, float y, unsigned long long nowMs, bool* refused = nullptr)
+{
+    if (refused) { *refused = false; }
+    if (!s.have || y >= s.y - kStandDipM) {
+        s.have = true;
+        s.y = y;
+        s.lowSinceMs = 0;
+        return s.y;
+    }
+    if (s.lowSinceMs == 0 || nowMs - s.lastLowMs > kStandGapMs) { s.lowSinceMs = nowMs; }
+    s.lastLowMs = nowMs;
+    if (nowMs - s.lowSinceMs >= kStandLowMs) {
+        s.y = y;
+        s.lowSinceMs = 0;
+        return s.y;
+    }
+    if (refused) { *refused = true; }
+    return s.y;
+}
+
 constexpr float kRigidRampS = 0.25f;
 inline float RigidRampStep(float k, bool active, float dt)
 {
@@ -249,11 +469,288 @@ struct Ledge {
     int   rays = 0;         // casts made
 };
 
+// ===== P5 round 1: ladders, pipes and poles grabbed by hand (design §4.9 revised) =====
+// [BIN] The game's ladder (LadderController, group 7) starts from the player's use target (player+0x14A0, valid while +0x1498 is
+// set) when it is a LadderDI: walking into it (+BDD040, its group-7 switches at +BDD277 / +BDD734) or the use key (+BDCAE0, at
+// +BDCF0F). LadderController reads the climbable through OwnerLadderInfo (vtable +172E178), which wraps the LadderDI: +0x10 its
+// IControlObject (LadderDI+0x18)'s GetWorldPosition, +0x18 GetForwardVector, +0x20 GetLeftVector, +0x28 the kind (LadderDI+0x36C:
+// 0 ONE_SIDE_LADDER, 1 PIPE, 2 ROPE, 3 UNDERWATER_ROPE), +0x30 the turn limits (+0x380 / +0x384), +0x38 the height over its world
+// extents' bottom (GetExtentsInWorld: min at +0, max at +0xC). The attach (+D34340) stands the player 0.42 m from the position
+// against the forward vector, so the position is the climbable's own line.
+// Hand mode: the game's ladder never starts (RefuseLadderStart). A grip next to the climbable's own collider grabs it ANYWHERE on its
+// surface (PoleSurfaceFind / PoleLedgeAt, round 2 - round 1 measured to its centre line and a fixed half-width, which fit no real
+// ladder: tester "I think there aren't any thin poles"), as a hang of the ledge grab on a ledge made there: the same hand-driven
+// body as ledges (P2), no ladder animation, no rungs. The line and extents (ReadPole) are logged and give the facing fallback.
+struct Pole {
+    float axis[3] = {};       // the climbable's position (x / z)
+    float fwd[3] = {};        // its forward vector (the side the game stands the player on is -fwd)
+    float yLo = 0.0f, yHi = 0.0f;   // its world extents' bottom / top
+    int   kind = 0;           // 0 ladder, 1 pipe, 2 rope, 3 underwater rope
+};
+
 constexpr float kFaceBackM  = 0.45f;   // face rays start this far behind the hand (toward the player)
 constexpr float kFacePastM  = 0.35f;   // ... and end this far past it
 constexpr float kTopAboveM  = 0.50f;   // top rays start this far above the face hit
 constexpr float kTopBelowM  = 0.10f;   // ... and end this far below it
 constexpr float kHalfEdgeM  = 0.25f;   // half the edge handed to the game
+
+// P5 round 2 (tester 2026-11-27: "a lot of objects the game codes as ladders/poles/pipes/whatever are not thin poles ... I want to
+// be able to grab anywhere on the surface of the ladder/pole/whatever collider"; run 23: search rays DO hit the climbable - their
+// owner is the LadderDI). The grab point is where a short ray around the hand meets the climbable's own collider: kSurfDirs
+// directions (8 around, up, down), each from kSurfBackM behind the hand (so a hand pushed into it still finds its surface) to
+// reachM past it; the hit on a climbable (isTarget after each cast) nearest the hand, within reachM of it, wins.
+constexpr float kSurfBackM = 0.30f;
+constexpr int   kSurfDirs  = 10;
+template <class CastFn, class IsTargetFn>
+inline bool PoleSurfaceFind(const float hand[3], float reachM, CastFn&& cast, IsTargetFn&& isTarget, float hitOut[3], float* distOut,
+                            int* raysOut, int* bestRayOut = nullptr)   // bestRayOut: which cast (0-based) gave the hit (its owner)
+{
+    static const float k[kSurfDirs][3] = {
+        { 1, 0, 0 }, { 0.7071f, 0, 0.7071f }, { 0, 0, 1 }, { -0.7071f, 0, 0.7071f },
+        { -1, 0, 0 }, { -0.7071f, 0, -0.7071f }, { 0, 0, -1 }, { 0.7071f, 0, -0.7071f },
+        { 0, 1, 0 }, { 0, -1, 0 } };
+    bool found = false;
+    float best = 1e9f;
+    int rays = 0;
+    for (int i = 0; i < kSurfDirs; ++i) {
+        const float* d = k[i];
+        const float from[3] = { hand[0] - d[0] * kSurfBackM, hand[1] - d[1] * kSurfBackM, hand[2] - d[2] * kSurfBackM };
+        const float to[3] = { hand[0] + d[0] * reachM, hand[1] + d[1] * reachM, hand[2] + d[2] * reachM };
+        float hit[3] = {};
+        ++rays;
+        if (!cast(from, to, hit) || !isTarget()) { continue; }
+        const float dx = hit[0] - hand[0], dy = hit[1] - hand[1], dz = hit[2] - hand[2];
+        const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist <= reachM && dist < best) {
+            best = dist;
+            hitOut[0] = hit[0]; hitOut[1] = hit[1]; hitOut[2] = hit[2];
+            if (bestRayOut) { *bestRayOut = i; }
+            found = true;
+        }
+    }
+    if (distOut) { *distOut = found ? best : -1.0f; }
+    if (raysOut) { *raysOut = rays; }
+    return found;
+}
+// The ledge handed to the ledge grab for a surface hold: lip = the surface point, into = from the feet to it, horizontal (the feet
+// under it: fallbackFwd). False = no direction at all.
+inline bool PoleLedgeAt(const float hit[3], const float feet[3], const float fallbackFwd[3], Ledge* out)
+{
+    float ix = hit[0] - feet[0], iz = hit[2] - feet[2];
+    float il = std::sqrt(ix * ix + iz * iz);
+    if (!(il > 0.05f)) {
+        ix = fallbackFwd[0]; iz = fallbackFwd[2];
+        il = std::sqrt(ix * ix + iz * iz);
+        if (!(il > 1e-3f)) { return false; }
+    }
+    ix /= il; iz /= il;
+    for (int i = 0; i < 3; ++i) { out->lip[i] = hit[i]; }
+    out->into[0] = ix; out->into[1] = 0.0f; out->into[2] = iz;
+    const float sx = -iz, sz = ix;
+    out->a[0] = hit[0] - sx * kHalfEdgeM; out->a[1] = hit[1]; out->a[2] = hit[2] - sz * kHalfEdgeM;
+    out->b[0] = hit[0] + sx * kHalfEdgeM; out->b[1] = hit[1]; out->b[2] = hit[2] + sz * kHalfEdgeM;
+    out->rays = 0;
+    return true;
+}
+
+// The game's own ladder start (its group-7 switch from the use target's walk-in / use key) is refused in hand mode when
+// climb_ladder_by_hand is on; fromLadderSite = the switch's return address is one of those three calls.
+inline bool RefuseLadderStart(bool handMode, bool ladderByHand, bool localPlayer, int group, bool fromLadderSite)
+{
+    return handMode && ladderByHand && localPlayer && group == 7 && fromLadderSite;
+}
+
+// P5 (tester 2026-11-27: "remove the ladder use floating UI when the ladder hand climbing setting is enabled"): the game's HUD
+// interaction prompt (HudTriggerSlot::Update, its X "use" slot - and the mod's in-world copy of it, promptquad) for a ladder / pipe /
+// rope (trigger class LadderDI) offers the game's own ladder climb, which hand mode refuses (RefuseLadderStart). While that refusal is
+// live the slot is updated with NO trigger - the game's own "nothing to use" path - so neither prompt shows.
+inline bool HideLadderPrompt(bool handMode, bool ladderByHand, bool ladderGateLive, bool triggerIsLadder)
+{
+    return handMode && ladderByHand && ladderGateLive && triggerIsLadder;
+}
+// P6 (tester 2026-11-27: "If the setting is on, are hud prompts hidden for ziplines? they should"): the zipline's prompt is the HUD's
+// for the game's FakeZipLineTrigger (player+0x2CA8: +BD3C60 places it in front of the player each update a line is a candidate, so
+// the HUD has a trigger to show "jump" for) - or a ZipLine itself. Hidden while ziplines are grabbed by hand (ServeZip is live).
+inline bool HideZiplinePrompt(bool handMode, bool zipByHand, bool zipLive, bool triggerIsZipline)
+{
+    return handMode && zipByHand && zipLive && triggerIsZipline;
+}
+// P6 (tester 2026-11-28: "pressing A is still mounting me on the zipline"): the game's own zipline start - the jump near a line, its
+// group-27 switch at +BD43BF inside +BD3C60 - is refused for the local player while ziplines are grabbed by hand (ServeZip's own
+// switch goes through the trampoline, never this gate). The jump itself stays a jump.
+inline bool RefuseZiplineJumpStart(bool handMode, bool zipByHand, bool zipLive, bool localPlayer, int group, bool fromJumpSite)
+{
+    return handMode && zipByHand && zipLive && localPlayer && group == 27 && fromJumpSite;
+}
+// Round 4 (2026-11-28): the game's whole zipline try-start (+BD3C60) is skipped by hand - a refused button mount still jumped the
+// player toward the controller's stale attach point (~140 m up on the first line of a session). Same conditions, minus the site.
+inline bool SkipZipTry(bool handMode, bool zipByHand, bool zipLive, bool localPlayer)
+{
+    return handMode && zipByHand && zipLive && localPlayer;
+}
+
+// P6 ZIPLINES BY HAND (design §4.10 "a grip above the head on a zipline starts ZipLineController"; static RE 2026-11-27, §8.18). The
+// game keeps every zipline in one list (gamedll +1BA8D08, count +1BA8D10; each entity: A = start +0xA8, B = end +0xB4, D = unit A->B
+// +0xC0, its model +0xD0, its name +0xD8). Its own start (+BD3C60) takes the line nearest the body, cuts the last kZipEndCutM off the
+// far end, and needs jump held, the body in the air and the body's yaw within 30 deg of A->B. Ours: a grip whose ledge search found
+// nothing, with the hand within reachM of a line's grabbable part, starts that line the game's own way (the controller's line record,
+// its name, group 27) - no look, yaw or air test. The ride after that is the game's.
+constexpr float kZipEndCutM = 4.5f;   // the game's own (+B19850, 0x1819274D4): the last 4.5 m of a line are never grabbed
+struct ZipLine {
+    float a[3] = {}, b[3] = {}, d[3] = {};
+};
+// The distance (m) from p to the line's grabbable segment [A, B - kZipEndCutM D]; closest = that point. -1 when the segment is empty
+// (a line shorter than the cut).
+inline float ZipDistance(const float p[3], const ZipLine& z, float closest[3])
+{
+    const float e[3] = { z.b[0] - kZipEndCutM * z.d[0], z.b[1] - kZipEndCutM * z.d[1], z.b[2] - kZipEndCutM * z.d[2] };
+    const float s[3] = { e[0] - z.a[0], e[1] - z.a[1], e[2] - z.a[2] };
+    const float ll = s[0] * s[0] + s[1] * s[1] + s[2] * s[2];
+    if (!(ll > 1e-6f) || (s[0] * z.d[0] + s[1] * z.d[1] + s[2] * z.d[2]) <= 0.0f) { return -1.0f; }
+    float t = ((p[0] - z.a[0]) * s[0] + (p[1] - z.a[1]) * s[1] + (p[2] - z.a[2]) * s[2]) / ll;
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    for (int i = 0; i < 3; ++i) { closest[i] = z.a[i] + t * s[i]; }
+    const float q[3] = { p[0] - closest[0], p[1] - closest[1], p[2] - closest[2] };
+    return std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+}
+// A grip that found no ledge starts the zipline: hand mode with the setting, not already climbing / riding, the nearest grabbable
+// line within reachM of the hand.
+inline bool ZipGrabOk(bool handMode, bool zipByHand, bool climbing, bool riding, float dist, float reachM)
+{
+    return handMode && zipByHand && !climbing && !riding && dist >= 0.0f && dist <= reachM;
+}
+
+// P6 round 3 - HANDS ON THE ZIPLINE (tester 2026-11-28: "your hand snaps to the line and moving your hand moves your body, same way it
+// is for ledges, you should also be able to launch yourself off in some direction, not just drop off"; "drop off is good, and the game
+// sliding you down is good as well"). The game's ride keeps sliding; each holding hand's anchor is a point on the cable that rides
+// with it (advance = how far the ride carried the body since the last poll, from the game thread), and P2's pull (anchor - hand)
+// moves the body on top of the ride's own velocity. A second grip closing within reachM of the cable joins at the cable's nearest
+// point. Opening every grip ends the ride: a launch when the hands were pulling fast (LaunchPick, as off a ledge), a plain drop
+// otherwise. A hand pulled more than releaseM from its anchor lets go (a slip). The game ending the ride (the line's end, its own
+// jump) ends the hold.
+struct ZipHold {
+    bool  on = false;
+    bool  has[2] = {};
+    float anchor[2][3] = {};
+    ZipLine line;               // the whole cable (A -> B, no cut) for joins
+};
+struct ZipHoldOut {
+    bool  drive = false;
+    float err[3] = {};
+    bool  joined[2] = {};
+    bool  released[2] = {};     // this hand let go (opened or slipped)
+    bool  slipped[2] = {};      // ...by distance, the grip still closed
+    bool  end = false;          // no hand holds any more: end the ride
+    bool  endOpened = false;    // ...because the grips opened (a launch may follow), not a slip
+    bool  gameEnded = false;    // the game ended the ride itself
+};
+inline void ZipHoldStart(ZipHold& z, int hand, const float point[3], const ZipLine& line)
+{
+    z = ZipHold();
+    z.on = true;
+    z.line = line;
+    if (hand < 0 || hand > 1) { return; }
+    z.has[hand] = true;
+    for (int i = 0; i < 3; ++i) { z.anchor[hand][i] = point[i]; }
+}
+// The nearest point of the whole cable [A, B] to p, and its distance (-1 = a degenerate line).
+inline float ZipCableDistance(const float p[3], const ZipLine& z, float closest[3])
+{
+    const float s[3] = { z.b[0] - z.a[0], z.b[1] - z.a[1], z.b[2] - z.a[2] };
+    const float ll = s[0] * s[0] + s[1] * s[1] + s[2] * s[2];
+    if (!(ll > 1e-6f)) { return -1.0f; }
+    float t = ((p[0] - z.a[0]) * s[0] + (p[1] - z.a[1]) * s[1] + (p[2] - z.a[2]) * s[2]) / ll;
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    for (int i = 0; i < 3; ++i) { closest[i] = z.a[i] + t * s[i]; }
+    const float q[3] = { p[0] - closest[0], p[1] - closest[1], p[2] - closest[2] };
+    return std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+}
+inline ZipHoldOut ZipHoldStep(ZipHold& z, bool riding, const bool grip[2], const bool gripEdge[2], const bool handOk[2],
+                              const float hand[2][3], const float advance[3], float reachM, float releaseM)
+{
+    ZipHoldOut o;
+    if (!z.on) { return o; }
+    if (!riding) {
+        o.gameEnded = true;
+        z = ZipHold();
+        return o;
+    }
+    float sum[3] = {};
+    int n = 0;
+    for (int h = 0; h < 2; ++h) {
+        if (z.has[h]) {
+            for (int i = 0; i < 3; ++i) { z.anchor[h][i] += advance[i]; }
+            if (!grip[h]) {
+                z.has[h] = false;
+                o.released[h] = true;
+                continue;
+            }
+        } else if (grip[h] && gripEdge[h] && handOk[h]) {
+            float c[3];
+            const float d = ZipCableDistance(hand[h], z.line, c);
+            if (d >= 0.0f && d <= reachM) {
+                z.has[h] = true;
+                o.joined[h] = true;
+                for (int i = 0; i < 3; ++i) { z.anchor[h][i] = c[i]; }
+            }
+        }
+        if (!z.has[h] || !handOk[h]) { continue; }
+        const float e[3] = { z.anchor[h][0] - hand[h][0], z.anchor[h][1] - hand[h][1], z.anchor[h][2] - hand[h][2] };
+        const float dist = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+        if (releaseM > 0.0f && dist > releaseM) {
+            z.has[h] = false;
+            o.released[h] = true;
+            o.slipped[h] = true;
+            continue;
+        }
+        sum[0] += e[0]; sum[1] += e[1]; sum[2] += e[2];
+        ++n;
+    }
+    if (n > 0) {
+        o.drive = true;
+        for (int i = 0; i < 3; ++i) { o.err[i] = sum[i] / static_cast<float>(n); }
+    }
+    if (!z.has[0] && !z.has[1]) {
+        o.end = true;
+        o.endOpened = !o.slipped[0] && !o.slipped[1];
+        z = ZipHold();
+    }
+    return o;
+}
+
+// P6 climbing XP, option X1 (design §8.3, user decision 2026-11-25: the game's own numbers only). Every climb-up from a hand hang
+// already pays: the game's set-state (+D0CD20) awards +CEA740(xpModule, EdgeGrab+0x1F8) whenever the state it leaves is 8, and both
+// the stick's climb-up and round 18's cut-short (8 -> 10) go through it. What the game never sees is a LAUNCH that ends in a new
+// grab (a dyno): the launch drops the ledge grab, the catch is a fresh start. That pays climb type 5 (RunnerXPClimbJump180, 10 / 20)
+// through the same +CEA740, so the game's skills, night / exhaustion factors and its own anti-farm (1.3 m / 5 s) all apply.
+// Ours on top: the catch counts only within kLaunchXpWindowMs of the launch and with the feet at least kLaunchXpMinM from where they
+// left (a hop back onto the same hold pays nothing). One launch pays at most once.
+constexpr int                kXpTypeJump180    = 5;
+constexpr unsigned long long kLaunchXpWindowMs = 2500;
+constexpr float              kLaunchXpMinM     = 1.0f;
+struct LaunchXp {
+    bool               armed = false;
+    unsigned long long t0 = 0;
+    float              feet0[3] = {};
+};
+inline void ArmLaunchXp(LaunchXp& x, unsigned long long now, const float feet[3], bool haveFeet)
+{
+    x.armed = haveFeet;
+    x.t0 = now;
+    for (int i = 0; i < 3; ++i) { x.feet0[i] = haveFeet ? feet[i] : 0.0f; }
+}
+// A new grab started (feet = the feet now). True = pay the launch catch. Always disarms; distOut = the feet's travel (m), -1 when no
+// launch was armed or the window has passed.
+inline bool LaunchCatchPays(LaunchXp& x, unsigned long long now, const float feet[3], float* distOut)
+{
+    *distOut = -1.0f;
+    const bool armed = x.armed;
+    x.armed = false;
+    if (!armed || now < x.t0 || now - x.t0 > kLaunchXpWindowMs) { return false; }
+    const float dx = feet[0] - x.feet0[0], dy = feet[1] - x.feet0[1], dz = feet[2] - x.feet0[2];
+    *distOut = std::sqrt(dx * dx + dy * dy + dz * dz);
+    return *distOut >= kLaunchXpMinM;
+}
 // Heights around the hand (a hand up to 40 cm above the top included). Round 3 (2026-11-26, run 2: "no wall face" for hands held
 // above the head): the face rays go out in a FULL CIRCLE around the hand, every 30 deg, not a cone along feet -> hand - over the head
 // that direction is noise. The face nearest the hand wins, so the extra directions only add hits that the cone missed.
@@ -271,6 +768,61 @@ constexpr float kSightGapM  = 0.03f;   // the sight ray stops this short of the 
 constexpr float kRoomUpM    = 0.25f;
 constexpr float kRoomFrontM = 0.35f;
 constexpr float kRoomInM    = 0.15f;
+
+// ROOM TO CLIMB UP (tester 2026-11-28: "sometimes you are able to mantle onto spaces where you don't fit ... I grabbed onto a closet
+// inside a house ... then I mantled and went to the ceiling onto the upper floor" / "if I mantle onto a tight spot that requires me to
+// be crouched, it'll send me to the normal standing height ... it should leave me crouched" / "don't start the raycast too close to
+// the ledge"). Before a climb-up from a hang, the spot the body ends on - kRoomSpotInM past the lip, inward - is tested at standing
+// height, then crouched: three vertical columns (the spot, and kRoomSideM either side along the edge), each an UP ray from
+// kRoomFromM over the top to the height and a DOWN ray back (the engine's casts are one-sided: the up ray finds a ceiling's
+// underside, the down ray the top of a slab or floor the up ray started inside). Below kRoomFromM nothing counts - debris lying on
+// the top is stepped over. Stand fits = the game's climb-up; only crouched = the climb-up, then the crouch is held while the spot
+// over the feet has no standing room (StandRoomAt); neither = no climb-up.
+constexpr float kRoomSpotInM = 0.50f;
+constexpr float kRoomSideM   = 0.20f;
+constexpr float kRoomFromM   = 0.50f;
+constexpr float kStandRoomM  = 1.80f;
+constexpr float kCrouchRoomM = 1.15f;
+enum ClimbRoom : int { kRoomStand = 0, kRoomCrouch = 1, kRoomNone = 2 };
+// One column at (x, base y, z): clear from base + kRoomFromM to base + heightM. hitY = the lowest hit's height over base (or keeps).
+template <class CastFn>
+inline bool RoomColumn(float x, float baseY, float z, float heightM, CastFn&& cast, float* hitY)
+{
+    const float lo[3] = { x, baseY + kRoomFromM, z }, hi[3] = { x, baseY + heightM, z };
+    float h[3] = {};
+    bool clear = true;
+    if (cast(lo, hi, h)) { clear = false; if (h[1] - baseY < *hitY) { *hitY = h[1] - baseY; } }
+    if (cast(hi, lo, h)) { clear = false; if (h[1] - baseY < *hitY) { *hitY = h[1] - baseY; } }
+    return clear;
+}
+// lip = the held ledge point (top height), into = into the wall (horizontal). hitY = the lowest thing found over the top (m; 99 = none).
+template <class CastFn>
+inline int ClimbUpRoom(const float lip[3], const float into[3], CastFn&& cast, float* hitY)
+{
+    *hitY = 99.0f;
+    float nx = into[0], nz = into[2];
+    const float n = std::sqrt(nx * nx + nz * nz);
+    if (!(n > 1e-4f)) { return kRoomStand; }   // no direction: cannot test - the game decides as before
+    nx /= n; nz /= n;
+    const float sx = -nz, sz = nx;   // along the edge
+    const float cx = lip[0] + nx * kRoomSpotInM, cz = lip[2] + nz * kRoomSpotInM;
+    const float hs[2] = { kStandRoomM, kCrouchRoomM };
+    for (int k = 0; k < 2; ++k) {
+        bool ok = true;
+        for (int c = -1; c <= 1 && ok; ++c) {
+            ok = RoomColumn(cx + sx * kRoomSideM * c, lip[1], cz + sz * kRoomSideM * c, hs[k], cast, hitY);
+        }
+        if (ok) { return k == 0 ? kRoomStand : kRoomCrouch; }
+    }
+    return kRoomNone;
+}
+// The standing room over the feet (one column) - the held crouch after a crouched climb-up lets go once it is true.
+template <class CastFn>
+inline bool StandRoomAt(const float feet[3], CastFn&& cast)
+{
+    float hy = 99.0f;
+    return RoomColumn(feet[0], feet[1], feet[2], kStandRoomM, cast, &hy);
+}
 
 template <class CastFn>
 inline int FindLedge(const float hand[3], const float feet[3], float reachM, CastFn&& cast, Ledge* out)
@@ -483,6 +1035,30 @@ inline void PullVelocity(const float err[3], float tauS, float maxMps, float out
     out[0] = v[0]; out[1] = v[1]; out[2] = v[2];
 }
 
+// NO GRAB ANIMATION (tester 2026-11-28: "the 'go to grab mode' animation often makes me clip through walls or moves me in a weird
+// way. Could you get rid of the animation completely and just move me towards the grab position over at a reasonable speed", then
+// "make the speed configurable"). The grab (state 0) is the game's root-motion swing onto the ledge; it ends on a timer with
+// set-state 8 or 1 (+D0A240 at +D0A4B9, nothing else done there). A hand grab that is due to HANG (the start armed the 0 -> 1 hang;
+// still within its window) is set to 1 on the first update it is seen in 0. The hold's own pull (PullStep / MotionStep) then moves the
+// body until the hand is on its ledge point - with the walk's collisions, so no wall is crossed - capped at GrabGlideCap.
+inline bool SkipGrabAnim(bool enabled, bool handMode, bool ours, bool due, bool active, int state)
+{
+    return enabled && handMode && ours && due && active && state == 0;
+}
+// The glide: while any anchored hand has not yet SETTLED on its ledge point (a new grab), the pull is capped at grabMps (at least
+// kGrabGlideMinMps); after that, climb_pull_max_mps. grabMps <= 0 / NaN = no glide cap.
+constexpr float kGrabGlideMinMps = 0.5f;
+inline bool GrabGliding(const Pull& p)
+{
+    for (int h = 0; h < 2; ++h) { if (p.has[h] && !p.settled[h]) { return true; } }
+    return false;
+}
+inline float GrabGlideCap(bool gliding, float grabMps, float pullMaxMps)
+{
+    if (!gliding || !(grabMps > 0.0f)) { return pullMaxMps; }
+    return grabMps < kGrabGlideMinMps ? kGrabGlideMinMps : grabMps;
+}
+
 // P4 round 2 (tester 2026-11-27: "if you grab 2 ledges at once, the ledge-follow and mantle logic should just use the last one the
 // player grabbed"): which hand's ledge is "the ledge held" for the climb-up height, the stale-ledge test and the climb on the held
 // ledge - the last hand that grabbed (lastGrab, 0 = left, 1 = right, -1 = none yet) while it is anchored on a ledge point, else the
@@ -561,6 +1137,82 @@ constexpr float              kLaunchMaxSideMps = 3.0f;     // WallJumpBackSpeed
 constexpr unsigned long long kLaunchWindowMs  = 150;
 constexpr int                kSentRing        = 16;
 
+// P5 / P6 look-aimed JUMP BUTTON from any hang, ledge or pole (design §4.9 jumps; tester 2026-11-27: "pressing the jump button should
+// make you jump at full force (so the flatscreen game's default) from wherever you are hanging towards wherever you are looking. This
+// is both for ledges and poles. If you are looking towards the wall/pole, it should jump you upwards ... else it should jump you
+// wherever you are looking"). The game's hang input handler (+D19BA0, action 0xB) asks 9 (+D19D50) or 4 (+D19D41) for the jump
+// button - and for the stick pushed up (P4 round 20), so an ask with the stick freshly forward stays the stick's.
+// The jump: only the look's YAW decides (never the pitch), measured against the hang's into-the-wall direction (the ledge grab's
+// target direction - the wall's, or feet -> the pole's surface): under sideDeg = straight up at the game's full jump
+// (kLaunchMaxUpMps, JumpMaxHeight 1.01 m); at or past it = the same full jump up plus WallJumpBackSpeed (kLaunchMaxSideMps)
+// horizontally along the look. No look (or no wall direction) = straight up.
+inline bool JumpButtonAsk(bool handMode, bool jumpByLook, int from, int to, bool fromJumpCall, bool stickFwd)
+{
+    const bool hold = from == 1 || from == 2 || from == 3 || from == 7 || from == 14;   // IsHoldState (defined below)
+    return handMode && jumpByLook && hold && (to == 4 || to == 9) && fromJumpCall && !stickFwd;
+}
+// The angle (deg, 0..180) between the look's horizontal direction and into-the-wall; -1 when either has no horizontal length.
+inline float LookYawFromWallDeg(const float look[3], const float into[3])
+{
+    const float ll = std::sqrt(look[0] * look[0] + look[2] * look[2]), il = std::sqrt(into[0] * into[0] + into[2] * into[2]);
+    if (!(ll > 1e-3f) || !(il > 1e-3f)) { return -1.0f; }
+    float c = (look[0] * into[0] + look[2] * into[2]) / (ll * il);
+    c = c > 1.0f ? 1.0f : (c < -1.0f ? -1.0f : c);
+    return std::acos(c) * 57.29578f;
+}
+// v = the jump's velocity (world, m/s). Returns true for a push-off along the look, false for straight up. yawOut = the measured
+// angle (-1 = unknown: straight up).
+inline bool LookJumpVelocity(const float look[3], bool haveLook, const float into[3], float sideDeg, float v[3], float* yawOut)
+{
+    const float yaw = haveLook ? LookYawFromWallDeg(look, into) : -1.0f;
+    *yawOut = yaw;
+    v[0] = 0.0f; v[1] = kLaunchMaxUpMps; v[2] = 0.0f;
+    if (yaw < 0.0f || yaw < sideDeg) { return false; }
+    const float ll = std::sqrt(look[0] * look[0] + look[2] * look[2]);
+    v[0] = look[0] / ll * kLaunchMaxSideMps;
+    v[2] = look[2] / ll * kLaunchMaxSideMps;
+    return true;
+}
+// Round 21 (tester 2026-11-28: "When pressing A to jump on from a pole or ladder, the first jump in the game, regardless of where I'm
+// looking, is always upwards"): the "toward the climbable" direction the look is measured against. On a pole / ladder it is measured
+// NOW, from the feet to where the hands hold (the anchored points' mean), not the ledge made at the grab (feet -> the surface then; by
+// the jump the body has moved round and up the pole by hand, and the grab's own fallback is the climbable's fixed forward vector when
+// the feet were under the hand). Ledges keep the wall's direction. Returns the source: 2 = the hold, 1 = the wall / grab direction,
+// 0 = none (straight up).
+constexpr float kJumpIntoMinM = 0.05f;
+inline int JumpInto(bool pole, const float feet[3], bool haveFeet, const float holdMid[3], bool haveHold, const float wallDir[3],
+                    bool haveWall, float out[3])
+{
+    if (pole && haveFeet && haveHold) {
+        const float x = holdMid[0] - feet[0], z = holdMid[2] - feet[2];
+        const float l = std::sqrt(x * x + z * z);
+        if (l > kJumpIntoMinM) {
+            out[0] = x / l; out[1] = 0.0f; out[2] = z / l;
+            return 2;
+        }
+    }
+    if (haveWall) {
+        for (int i = 0; i < 3; ++i) { out[i] = wallDir[i]; }
+        return 1;
+    }
+    out[0] = out[1] = out[2] = 0.0f;
+    return 0;
+}
+
+// The headset's forward (-Z of its orientation q = x, y, z, w, OpenXR tracking space) in the game world: the same yaw the hands get
+// (looting.cpp HandWorld: off' = (x c + z s, y, -x s + z c), s negated with AimMirrorYaw), rel = CamHookGetOpenXrToGameYaw.
+inline void HeadForwardGame(const float q[4], float rel, bool mirror, float out[3])
+{
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float fx = -2.0f * (x * z + w * y), fy = -2.0f * (y * z - w * x), fz = -(1.0f - 2.0f * (x * x + y * y));
+    const float c = std::cos(rel);
+    float s = std::sin(rel);
+    if (mirror) { s = -s; }
+    out[0] = fx * c + fz * s;
+    out[1] = fy;
+    out[2] = -fx * s + fz * c;
+}
+
 // What the pad thread last published about the anchored hands (climbhand.cpp, every poll).
 struct Hold {
     bool               drive = false;   // at least one anchored hand (PullOut::drive)
@@ -570,6 +1222,7 @@ struct Hold {
     float              topY = 0.0f;     // the highest anchored ledge point's height
     float              mid[3] = {};     // the mean anchored ledge point
     float              into[3] = {};    // the mean inward (into the wall) direction of the anchored hands' ledges, horizontal
+    bool               gliding = false; // a newly anchored hand has not settled yet (GrabGliding): the pull is capped at the glide speed
 };
 
 struct Motion {
@@ -1002,7 +1655,139 @@ struct GameView {
     int                egState = -1;       // its current state (+0x1FC)
     bool               onFoot = false;     // the controller group allows a new climb (roomscale's on-foot rule)
     unsigned long long ageMs = ~0ull;      // now - the publish time
+    unsigned           moveSeq = 0;        // round 19: bumped each time a game move from the hang ended back in it (MoveShiftStep)
+    float              moveShift[3] = {};  // ...and how far that move carried the body (game world, m)
+    bool               pole = false;       // P5 slide: the hang is on a ladder / pole (g_poleOn)
+    bool               haveFeet = false;   // ...the feet's height (world y) this update
+    float              feetY = 0.0f;
+    bool               havePoleLo = false; // ...the climbable's world bottom is known (its extents)
+    float              poleLoY = 0.0f;
+    int                poleKind = -1;      // 0 ladder, 1 pipe, 2 rope, 3 underwater rope (-1 unknown)
+    bool               zipRiding = false;  // P6 round 3: the zipline controller is active (ZipHold ends when it is not)
 };
+
+// P5 SLIDE (design §4.9 "Slide": "grips half-closed = slide down at the game's slide speed. Let go = a fall"). On a ladder / pole
+// hang, every holding hand's grip held but LIGHTLY (squeeze at or above the 0.5 hold threshold, under slideGripSq) slides the body
+// down: each poll the held anchors move down by speed x dt, and P2's hand-driven body follows them (the speed is capped under the
+// pull's own cap so the body keeps up and no hand drifts past climb_release_m). A full squeeze stops it at once; opening the grips is
+// the plain let-go. The slide stops at the BOTTOM: the feet within kSlideBottomM of the climbable's world bottom (its extents), or
+// the feet no lower than kSlideStallM over kSlideStallMs while sliding (the ground under an unreadable climbable, or something
+// solid). At the bottom the hang ends with the plain drop - the player stands at the foot of the ladder.
+constexpr float              kSlideBottomM  = 0.05f;
+constexpr float              kSlideStallM   = 0.02f;
+constexpr unsigned long long kSlideStallMs  = 250;
+constexpr float              kSlideMaxDtS   = 0.05f;   // a long gap between polls never jumps the anchors
+constexpr float              kSlideCapShare = 0.8f;    // the slide never above this share of climb_pull_max_mps
+struct Slide {
+    bool               on = false;
+    unsigned long long t0 = 0, lastMs = 0, stallMs = 0;
+    float              stallY = 0.0f;
+    float              y0 = 0.0f;     // the feet when it began (log)
+    bool               haveY0 = false;
+    float              slidM = 0.0f;  // the anchors' travel this slide (log)
+};
+// Every holding hand grips lightly (true), on a pole hang in a hold state. held = the machine's hand bits.
+inline bool SlideGrip(float slideMps, bool pole, bool holdState, unsigned held, const float sq[2], float slideGripSq)
+{
+    if (!(slideMps > 0.0f) || !pole || !holdState || held == 0) { return false; }
+    for (int h = 0; h < 2; ++h) {
+        if ((held & (1u << h)) && !(sq[h] < slideGripSq)) { return false; }
+    }
+    return true;
+}
+enum SlideResult : int { kSlideNone = 0, kSlideStart, kSlideMove, kSlideStop, kSlideBottom };
+// One poll. gripSlide = SlideGrip. downOut = how far the anchors move down this poll (m, >= 0). Bottom = the hang must end (plain
+// drop); Stop = the grip tightened / the hang ended.
+inline int SlideStep(Slide& s, bool gripSlide, unsigned long long now, float slideMps, float pullMaxMps, bool haveFeet, float feetY,
+                     bool haveLo, float loY, float* downOut)
+{
+    *downOut = 0.0f;
+    if (!gripSlide) {
+        const bool was = s.on;
+        s.on = false;
+        return was ? kSlideStop : kSlideNone;
+    }
+    int r = kSlideMove;
+    if (!s.on) {
+        s = Slide();
+        s.on = true;
+        s.t0 = s.lastMs = s.stallMs = now;
+        s.stallY = haveFeet ? feetY : 0.0f;
+        s.y0 = s.stallY;
+        s.haveY0 = haveFeet;
+        return kSlideStart;   // the first poll only times; the motion starts next poll
+    }
+    float dt = static_cast<float>(now - s.lastMs) * 0.001f;
+    s.lastMs = now;
+    if (dt > kSlideMaxDtS) { dt = kSlideMaxDtS; }
+    if (dt < 0.0f) { dt = 0.0f; }
+    if (haveFeet) {
+        if (haveLo && feetY - loY <= kSlideBottomM) { s.on = false; return kSlideBottom; }
+        if (feetY < s.stallY - kSlideStallM) {
+            s.stallY = feetY;
+            s.stallMs = now;
+        } else if (now - s.stallMs >= kSlideStallMs) {
+            s.on = false;
+            return kSlideBottom;
+        }
+    }
+    float v = slideMps;
+    const float cap = pullMaxMps * kSlideCapShare;
+    if (cap > 0.0f && v > cap) { v = cap; }
+    float d = v * dt;
+    if (haveFeet && haveLo && d > feetY - loY) { d = feetY - loY; }   // never below the bottom
+    if (d < 0.0f) { d = 0.0f; }
+    *downOut = d;
+    s.slidM += d;
+    return r;
+}
+
+// Round 19 (tester 2026-11-27: "regarding shimmies, they have been broken forever. If I'm grabbed onto a ledge, and I shimmy say
+// right, it does the animation, but then moves me back to where I was originally hanging. Same for up and sideways"). Each holding
+// hand's anchor is the ledge point its search found (PullStep); the game's own move from the hang (shimmy 11-13 / 15, reach-up 5 / 9)
+// carries the body - and the hands, which ride the body - but the anchors re-latch on the SAME old points when the hang resumes, so
+// P2 pulls the body straight back. MoveShiftStep follows the body through such a move: the feet at the last hold update before it,
+// and, when the grab is back in a hold state, the shift (feet now - then). The pad thread moves each held ledge point by it before
+// the anchors re-latch. Jumps / the climb-up / the drop end the hang, so they never come back to a hold with a shift.
+struct MoveShift {
+    bool  haveHold = false;   // lastFeet is from a hold update of this grab
+    bool  away = false;       // the grab left the hold states for one of the game's moves
+    int   moveState = -1;     // that move (for the log)
+    float lastFeet[3] = {};
+    float feet0[3] = {};
+};
+inline bool IsGameHangMove(int s)
+{
+    return (s >= 11 && s <= 13) || s == 15 || s == 5 || s == 9;
+}
+// True = a move just ended back in the hang; shift = how far it carried the body.
+inline bool MoveShiftStep(MoveShift& m, bool active, int state, const float feet[3], bool haveFeet, float shift[3])
+{
+    shift[0] = shift[1] = shift[2] = 0.0f;
+    if (!active) { m = MoveShift(); return false; }
+    const bool hold = state == 1 || state == 2 || state == 3 || state == 7 || state == 14;   // IsHoldState (below)
+    if (hold) {
+        bool done = false;
+        if (m.away && haveFeet) {
+            for (int i = 0; i < 3; ++i) { shift[i] = feet[i] - m.feet0[i]; }
+            done = true;
+        }
+        m.away = false;
+        if (haveFeet) {
+            for (int i = 0; i < 3; ++i) { m.lastFeet[i] = feet[i]; }
+            m.haveHold = true;
+        }
+        return done;
+    }
+    if (!m.away && m.haveHold && IsGameHangMove(state)) {
+        m.away = true;
+        m.moveState = state;
+        for (int i = 0; i < 3; ++i) { m.feet0[i] = m.lastFeet[i]; }
+    } else if (!m.away && !IsGameHangMove(state)) {
+        m.haveHold = false;   // a jump / climb-up / the grab itself: no hold to come back to with a shift
+    }
+    return false;
+}
 
 // Round 7 (2026-11-26, tester after run 5): (a) "grab a ledge with one hand, press grab with the other ANYWHERE, release the first:
 // the character keeps hanging with no hand on the ledge" - any press while hanging joined as a hold; (b) "pressing grab with the

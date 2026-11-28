@@ -22836,7 +22836,11 @@ void* __fastcall Hook(uintptr_t a1, float* w)
     InterlockedIncrement64(&g_win[r]);
     Window(GetTickCount64());
     float climb[3];
-    if (ClimbByHand && ClimbHandWalkOverride(a1, send, climb, MoveCtlActive(a1))) { return g_true(a1, climb); }
+    // [LOADBEARING: grapple_rope_swing] P7 (design §8.21): while the grappling hook's rope holds the player, the rope's velocity
+    //      replaces the game's pull (and any climb override - a climb that starts lets the rope go first). COST no rope: a few reads.
+    const bool moveCtl = MoveCtlActive(a1);
+    if (ClimbByHand && GrappleRopeWalk(a1, send, climb, moveCtl)) { return g_true(a1, climb); }
+    if (ClimbByHand && ClimbHandWalkOverride(a1, send, climb, moveCtl)) { return g_true(a1, climb); }
     return g_true(a1, send);
 }
 
@@ -28207,7 +28211,9 @@ void AhThrStep(uintptr_t pE)
     //      climb clips bend the spine, neck and head forward. While the ledge grab runs in hand mode this same hold arms (the episode
     //      starts with the grab, so the held pose is the upright one the grab began from) and lets go when it ends. A throwable out
     //      keeps it armed as before.
-    const bool byClimb = out != 1 && ClimbHoldBody && ClimbHandHanging();
+    //      Round 4 (tester 2026-11-28: the body "shortly moves to under the ledge and quickly comes back" when a grab ends): held for
+    //      0.5 s after the grab too, while the hang / climb clip blends out (ClimbHandBodyHeld, climbhand_logic.h BodyHoldTail).
+    const bool byClimb = out != 1 && ClimbHoldBody && ClimbHandBodyHeld();
     if (byClimb) { out = 1; }
     if (out == 1 && !g_ahThrEpisode) {
         g_ahThrByClimb = byClimb;
@@ -28518,6 +28524,7 @@ void EyePaStep(uintptr_t pE)
 // COST per bone-blend tick: not held = one 48-byte guarded read (the latch); held = one read + one flags read, a write only on drift.
 constexpr float kRootRefT[3] = { 0.0f, 0.9331f, 0.0256f };   // INV-657: the standing bip01 local t (clip frame 0, runs S3 / S4)
 constexpr float kRootRefTolM = 0.001f;
+constexpr float kRootRefQ[4] = { 0.0f, -0.70710678f, 0.0f, -0.70710678f };   // record floats 4..7 of every standing latch (round 15)
 bool      g_rtHaveRef = false, g_rtHeld = false, g_rtChecked = false, g_rtSaidFirst = false;
 float     g_rtRef[12] = {}, g_rtPrev[12] = {};
 int       g_rtStill = 0;
@@ -28527,6 +28534,7 @@ const char* const kRtNoEntry = "no map entry for bip01";
 ULONGLONG g_rtRefusedMs = 0, g_rtArmMs = 0;
 int       g_rtEntry = -1;
 uintptr_t g_rtEntryMap = 0;
+uintptr_t g_rtLayoutOkMap = 0;   // round 16: the map on which an arm passed the layout check (a climb's arm then skips it)
 unsigned  g_rtBits = 0;
 LONG64    g_rtArms = 0, g_rtReleases = 0, g_rtWrites = 0, g_rtReclears = 0, g_rtFaults = 0, g_rtLatches = 0;
 
@@ -28585,11 +28593,28 @@ void RootRelease(uintptr_t pE, const char* why)
         static_cast<long long>(g_rtFaults));
 }
 
+// [LOADBEARING: climb_hold_body] hand climbing P4 round 13 (tester 2026-11-27, after round 12's upper-body hold: "I think the problem
+//      is the hips though, since that's what drives movement in most games" / "we do need to hold the root as well"): the ledge grab's
+//      hang / climb clips move and tilt bip01 - the whole skeleton under the pelvis hold leans and drops with it. While the ledge grab
+//      runs in hand mode this same root hold holds bip01 at the standing reference (as for the pump), so the body stands where the
+//      rigid view (climb_view_rigid) puts the camera. Accepted cost, as for the pump: the root motion the clips would play is frozen.
+//      The hold is keyed kRtClimbKey instead of an item pointer (never a real object's address).
+constexpr uintptr_t kRtClimbKey = 1;
+
 // Every AnimHoldTick call, right after EyePaStep.
 void RootPaStep(uintptr_t pE)
 {
-    const uintptr_t right = static_cast<uintptr_t>(g_epaRightNow);
-    const bool pump = right != 0 && right == static_cast<uintptr_t>(g_epaItem);
+    const uintptr_t rightNow = static_cast<uintptr_t>(g_epaRightNow);
+    const bool pumpOut = rightNow != 0 && rightNow == static_cast<uintptr_t>(g_epaItem);
+    // (+ round 16: while a climb-up's lift is still being taken off after the grab ended - the body comes down with the view)
+    // (+ round 4: for 0.5 s after the grab ends, while its clip blends out - ClimbHandBodyHeld)
+    const bool climb = !pumpOut && ClimbHoldBody && (ClimbHandBodyHeld() || (g_rtHeld && g_rtItem == kRtClimbKey && ClimbHandOverLedgeLast() > 0.0f));
+    // `right` / `pump` from here = what is held and whether to hold: the pump item, or the climb's key
+    const uintptr_t right = climb ? kRtClimbKey : rightNow;
+    const bool pump = pumpOut || climb;
+    char whoItem[40] = "";
+    if (pumpOut) { std::snprintf(whoItem, sizeof(whoItem), "item %p", reinterpret_cast<void*>(right)); }   // only with a pump out
+    const char* const who = climb ? "the hand-climb ledge grab (climb_hold_body)" : whoItem;
     const bool proofOk = g_ahProved && !g_ahRefused && g_ahMap != 0;
     if (!g_rtSaidFirst) {
         g_rtSaidFirst = true;
@@ -28621,8 +28646,8 @@ void RootPaStep(uintptr_t pE)
             g_rtRefusedItem = right;
             g_rtRefusedWhy = kRtNoEntry;
             // [PROBE: EYEPA] gate=rig_throwable_body_hold,diag_bone_blend_probe,diag_bone_dump  site=HEADSET  log-only=no
-            LOG("boneblend: [EYEPA] ROOT *** NOT HELD *** for item %p - no map entry for bip01 (element %d) in %d entries. The root keeps "
-                "the animation.", reinterpret_cast<void*>(right), E6(0), n);
+            LOG("boneblend: [EYEPA] ROOT *** NOT HELD *** for %s - no map entry for bip01 (element %d) in %d entries. The root keeps "
+                "the animation.", who, E6(0), n);
         }
         return;
     }
@@ -28630,7 +28655,37 @@ void RootPaStep(uintptr_t pE)
     float k[12] = {};
     const bool kOk = SafeReadMtx34(at, k) && RootIsKey(k);
     if (!pump) {
-        RootRelease(pE, !right ? "the right hand is empty" : "the right hand no longer holds the pump-type shotgun");
+        // round 4 (tester 2026-11-28: after a grab the body "shortly moves to under the ledge and quickly comes back"): for 1 s after
+        // the climb's root hold lets go, the animation's own bip01 against the standing reference, every 100 ms - how far the clip
+        // still carries the body and how long it takes (the hold's 0.5 s tail is meant to cover it).
+        static ULONGLONG s_rtTraceT0 = 0, s_rtTraceNext = 0;
+        static float s_rtTraceMax = 0.0f;
+        if (g_rtHeld && g_rtItem == kRtClimbKey) {
+            s_rtTraceT0 = GetTickCount64();
+            s_rtTraceNext = s_rtTraceT0;
+            s_rtTraceMax = 0.0f;
+        }
+        RootRelease(pE, g_rtItem == kRtClimbKey ? "the hand-climb ledge grab ended + its 0.5 s tail (climb_hold_body)"
+                        : !right                ? "the right hand is empty" : "the right hand no longer holds the pump-type shotgun");
+        if (s_rtTraceT0 != 0) {
+            const ULONGLONG nowT = GetTickCount64();
+            if (nowT - s_rtTraceT0 > 1000) {
+                // [PROBE: EYEPA] gate=climb_hold_body  site=HEADSET  log-only=yes
+                LOG("boneblend: [EYEPA] ROOT AFTER CLIMB done - the animation's bip01 was at most %.1f cm off the standing reference in "
+                    "the 1 s after the hold let go (under ~2 cm = nothing visible; more = the clip still moved the body after the tail)",
+                    static_cast<double>(s_rtTraceMax * 100.0f));
+                s_rtTraceT0 = 0;
+            } else if (nowT >= s_rtTraceNext && kOk && g_rtHaveRef) {
+                s_rtTraceNext = nowT + 100;
+                const float dx = k[0] - g_rtRef[0], dy = k[1] - g_rtRef[1], dz = k[2] - g_rtRef[2];
+                const float dl = VecLen(dx, dy, dz);
+                if (dl > s_rtTraceMax) { s_rtTraceMax = dl; }
+                // [PROBE: EYEPA] gate=climb_hold_body  site=HEADSET  log-only=yes
+                LOG("boneblend: [EYEPA] ROOT AFTER CLIMB +%llu ms - the animation's bip01 t off the standing reference (%+.1f %+.1f %+.1f) "
+                    "cm = %.1f cm (bip01 local axes)", static_cast<unsigned long long>(nowT - s_rtTraceT0), static_cast<double>(dx * 100.0f),
+                    static_cast<double>(dy * 100.0f), static_cast<double>(dz * 100.0f), static_cast<double>(dl * 100.0f));
+            }
+        }
         // THE LATCH: the standing root of any other item (the record as the engine keeps it - convention-free). A STATIC stand only:
         // t within 1 mm of the reference AND the whole record unchanged (1e-4) for 10 ticks in a row - a walk clip passing near the
         // point (with another rotation) is never taken. Standing items read 0.0 mm range (runs S3 / S4).
@@ -28653,23 +28708,47 @@ void RootPaStep(uintptr_t pE)
         return;
     }
     if (g_rtHeld && (g_rtMap != map || g_rtItem != right)) {
-        RootRelease(pE, g_rtMap != map ? "the proven map changed" : "a different pump-type item");
+        RootRelease(pE, g_rtMap != map ? "the proven map changed"
+                        : (g_rtItem == kRtClimbKey || right == kRtClimbKey) ? "the climb hold and the pump hold changed over"
+                                                                             : "a different pump-type item");
     }
     const uintptr_t fAt = map + static_cast<uintptr_t>(g_rtEntry) * 0x10 + 8;
     if (!g_rtHeld) {
-        if (right == g_rtRefusedItem && GetTickCount64() - g_rtRefusedMs < 2000) { return; }
+        // round 16 (tester: "I'm still out of body when I grab a ledge, but it fixes after 1 or 2 seconds"; run 20: 20 of 39 grabs
+        // armed exactly 2 s late - the first try failed the layout check while the grab's clip blends in, then this wait): a climb
+        // retries every call.
+        if (!climb && right == g_rtRefusedItem && GetTickCount64() - g_rtRefusedMs < 2000) { return; }
         const char* res = nullptr;
         const uintptr_t pm = reinterpret_cast<uintptr_t>(g_playerMatrices);
         float live[12] = {};
         bool fOk = false;
         unsigned f = 0;
+        if ((!g_rtHaveRef || g_rtRefMap != map) && climb && kOk) {
+            // [LOADBEARING: climb_hold_body] round 15 (tester 2026-11-27: "now I am outside my body again when climbing, I see it in front
+            //      of me"; run 19: all 8 climbs came before the first stand-still latch at 20:51:02, so the root was never held). The
+            //      latched record has been the same in every run (S3 / S4, 2026-11-27 17:29 / 20:23 / 20:51): t kRootRefT, q kRootRefQ,
+            //      scale 1. For the climb, with nothing latched yet, that record is used; floats 3 and 11 (not t / q / s) are kept from
+            //      the live record. The pump still waits for a latch (its original contract). A later latch replaces this.
+            for (int i = 0; i < 12; ++i) { g_rtRef[i] = k[i]; }
+            for (int i = 0; i < 3; ++i) { g_rtRef[i] = kRootRefT[i]; }
+            for (int i = 0; i < 4; ++i) { g_rtRef[4 + i] = kRootRefQ[i]; }
+            g_rtRef[8] = g_rtRef[9] = g_rtRef[10] = 1.0f;
+            g_rtHaveRef = true;
+            g_rtRefMap = map;
+            // [PROBE: EYEPA] gate=rig_throwable_body_hold,diag_bone_blend_probe,diag_bone_dump  site=HEADSET  log-only=no
+            LOG("boneblend: [EYEPA] ROOT REFERENCE DEFAULTED for the climb (nothing latched on this map yet) - t (%+.4f %+.4f %+.4f) q "
+                "(%+.4f %+.4f %+.4f %+.4f) s 1, the record every earlier run latched standing; map %p.", kRootRefT[0], kRootRefT[1],
+                kRootRefT[2], kRootRefQ[0], kRootRefQ[1], kRootRefQ[2], kRootRefQ[3], reinterpret_cast<void*>(map));
+        }
         if (!g_rtHaveRef || g_rtRefMap != map) {
-            res = "no standing root reference latched on this map yet (hold any other item standing once)";
+            res = "no standing root reference latched on this map yet (stand still once, any item but a pump-type shotgun)";
         } else if (!kOk) {
             res = "bip01's pose record is not a TRS key";
         } else if (!pm || !SafeReadMtx34(pm + static_cast<uintptr_t>(E6(0)) * kBoneStride, live)) {
             res = "the live local is not readable (g_playerMatrices) - the layout check cannot run";
-        } else if (VecLen(k[0] - live[3], k[1] - live[7], k[2] - live[11]) > kEpaLayoutTolM) {
+        } else if (!(climb && g_rtLayoutOkMap == map) && VecLen(k[0] - live[3], k[1] - live[7], k[2] - live[11]) > kEpaLayoutTolM) {
+            // (round 16: a climb skips this once it has passed on this map - it proves the record's layout, which does not change
+            // while the map stays; mid-blend the record and the live local differ for a moment)
             res = "the record's t is NOT the live local's t - the layout assumption is wrong for this record";
         } else {
             f = static_cast<unsigned>(SafeRead32(fAt, &fOk));
@@ -28683,9 +28762,9 @@ void RootPaStep(uintptr_t pE)
             g_rtRefusedMs = GetTickCount64();
             if (say) {
                 // [PROBE: EYEPA] gate=rig_throwable_body_hold,diag_bone_blend_probe,diag_bone_dump  site=HEADSET  log-only=no
-                LOG("boneblend: [EYEPA] ROOT *** NOT HELD *** for item %p - %s. The root keeps the animation (the hips sway); retried every "
+                LOG("boneblend: [EYEPA] ROOT *** NOT HELD *** for %s - %s. The root keeps the animation (the hips sway); retried every "
                     "2 s, this reason not repeated. Record t (%+.4f %+.4f %+.4f), live local t (%+.4f %+.4f %+.4f), entry %d of %d.",
-                    reinterpret_cast<void*>(right), res, k[0], k[1], k[2], live[3], live[7], live[11], g_rtEntry, n);
+                    who, res, k[0], k[1], k[2], live[3], live[7], live[11], g_rtEntry, n);
             }
             return;
         }
@@ -28694,21 +28773,20 @@ void RootPaStep(uintptr_t pE)
         if (!SafeAnd32(fAt, ~mask, &before)) {
             ++g_rtFaults;
             g_rtRefusedItem = right;
-            LOG("boneblend: [EYEPA] ROOT *** NOT HELD *** for item %p - the flags write FAULTED. Nothing changed.",
-                reinterpret_cast<void*>(right));
+            LOG("boneblend: [EYEPA] ROOT *** NOT HELD *** for %s - the flags write FAULTED. Nothing changed.", who);
             return;
         }
         if (!RootWrite12(at, g_rtRef)) {
             SafeOr32(fAt, mask, nullptr);
             ++g_rtFaults;
             g_rtRefusedItem = right;
-            LOG("boneblend: [EYEPA] ROOT *** NOT HELD *** for item %p - the record write FAULTED; the bits were put back.",
-                reinterpret_cast<void*>(right));
+            LOG("boneblend: [EYEPA] ROOT *** NOT HELD *** for %s - the record write FAULTED; the bits were put back.", who);
             return;
         }
         g_rtHeld = true;
         g_rtMap = map;
         g_rtItem = right;
+        if (VecLen(k[0] - live[3], k[1] - live[7], k[2] - live[11]) <= kEpaLayoutTolM) { g_rtLayoutOkMap = map; }
         g_rtBits = mask;
         g_rtArmMs = GetTickCount64();
         g_rtChecked = false;
@@ -28716,17 +28794,23 @@ void RootPaStep(uintptr_t pE)
         g_rtReclears = 0;
         ++g_rtArms;
         // [PROBE: EYEPA] gate=rig_throwable_body_hold,diag_bone_blend_probe,diag_bone_dump  site=HEADSET  log-only=no
-        LOG("boneblend: [EYEPA] ROOT HOLD ARMED #%lld - item %p, bip01 entry %d: bits %03x cleared (flags %08x -> %08x); record t was "
+        LOG("boneblend: [EYEPA] ROOT HOLD ARMED #%lld - %s, bip01 entry %d: bits %03x cleared (flags %08x -> %08x); record t was "
             "(%+.4f %+.4f %+.4f) = live (%+.4f %+.4f %+.4f), now the latched reference (%+.4f %+.4f %+.4f) - %.1f mm moved. A CHECK line "
-            "follows in ~0.5 s.", static_cast<long long>(g_rtArms), reinterpret_cast<void*>(right), g_rtEntry, mask, before,
+            "follows in ~0.5 s.", static_cast<long long>(g_rtArms), who, g_rtEntry, mask, before,
             before & ~mask, k[0], k[1], k[2], live[3], live[7], live[11], g_rtRef[0], g_rtRef[1], g_rtRef[2],
             1000.0f * VecLen(k[0] - g_rtRef[0], k[1] - g_rtRef[1], k[2] - g_rtRef[2]));
         return;
     }
     // HELD: the record stays the reference (a lost write is re-applied), our bits stay clear.
+    // [LOADBEARING: climb_hold_body] P4 round 15: during the game's climb-up the climb's root comes down by how far the game lifted the
+    //      body's origin over the ledge top (ClimbHandOverLedgeLast, published by the camera call) - the body stands on the top, not
+    //      above it. bip01's local y is up (the model only yaws).
+    float tgt[12];
+    for (int i = 0; i < 12; ++i) { tgt[i] = g_rtRef[i]; }
+    if (g_rtItem == kRtClimbKey) { tgt[1] -= ClimbHandOverLedgeLast(); }
     bool drift = !kOk;
-    for (int i = 0; i < 12 && !drift; ++i) { if (k[i] - g_rtRef[i] > 1.0e-5f || g_rtRef[i] - k[i] > 1.0e-5f) { drift = true; } }
-    if (drift) { if (RootWrite12(at, g_rtRef)) { ++g_rtWrites; } else { ++g_rtFaults; } }
+    for (int i = 0; i < 12 && !drift; ++i) { if (k[i] - tgt[i] > 1.0e-5f || tgt[i] - k[i] > 1.0e-5f) { drift = true; } }
+    if (drift) { if (RootWrite12(at, tgt)) { ++g_rtWrites; } else { ++g_rtFaults; } }
     if (AhEntryStill(map, g_rtEntry, E6(0))) {
         bool fOk = false;
         const unsigned f = static_cast<unsigned>(SafeRead32(fAt, &fOk));
@@ -33827,10 +33911,13 @@ void EyePointApply(__int64 a1)
     //      the same world shift, so the drawn hands stay on the controllers.
     float rk = 0.0f, rigL[3] = {}, rigW[3] = {};
     if (ClimbByHand && camBase[0] == camBase[0]) {
-        rk = ClimbViewRigidK();
-        if (rk > 0.0f && g_epHaveRigid && g_getWorldXform) {
-            bool ok = false;
-            float x[12] = {};
+        // round 4: the vertical gap between the standing eye point and the game's animated head - the rigid view's tail after a grab
+        // lasts until it closes (the clip blended out; ClimbViewRigidK / climbhand_logic.h ViewHoldTail)
+        const float animGap = g_epHaveRigid ? std::fabs(g_epRigidL[1] - camBase[1]) : NAN;
+        rk = ClimbViewRigidK(animGap);
+        bool ok = false;
+        float x[12] = {};
+        if (g_getWorldXform) {
             __try {
                 void* iface = reinterpret_cast<void*>(a1 + 64);
                 void** vt   = *reinterpret_cast<void***>(iface);
@@ -33839,16 +33926,25 @@ void EyePointApply(__int64 a1)
                 const float* px = ow ? g_getWorldXform(reinterpret_cast<void*>(ow + 24)) : nullptr;
                 if (px) { for (int i = 0; i < 12; ++i) { x[i] = px[i]; } ok = true; }
             } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-            if (ok) {
-                for (int i = 0; i < 3; ++i) { rigL[i] = rk * (g_epRigidL[i] - camBase[i]); }
-                for (int r = 0; r < 3; ++r) { rigW[r] = x[4 * r] * rigL[0] + x[4 * r + 1] * rigL[1] + x[4 * r + 2] * rigL[2]; }
-                InterlockedIncrement64(&g_epRigidCalls);
-            } else {
-                rk = 0.0f;
-            }
+        }
+        // [LOADBEARING: climb_view_rigid] P4 round 15 (tester: "mantles seem to always leave me in the air a good half a meter above
+        //      the floor over the ledge ... As soon as the animation ends it drops me"): the game lifts the body's origin over the top
+        //      during its climb-up; the rigid view rides the origin. Lowered by the lift (ClimbHandOverLedgeM; 0 outside a climb-up).
+        //      Every camera call, rigid or not, so the root hold (RootPaStep) reads a fresh value too.
+        //      Round 16 (run 20: "still mantling too high (but just a bit now, I'd say 10cm or less)"; CLIMB-UP #1 ended with the origin
+        //      still 57 cm over the top): the lift outlasts the climb-up state, and after the grab the view is the game's own again,
+        //      which rides the lifted origin too. So the lowering is WHOLE (not scaled by rk) and goes on until the body is down.
+        const float overM = ok ? ClimbHandOverLedgeM(x[7]) : 0.0f;
+        if (rk > 0.0f && g_epHaveRigid && ok) {
+            for (int i = 0; i < 3; ++i) { rigL[i] = rk * (g_epRigidL[i] - camBase[i]); }
+            InterlockedIncrement64(&g_epRigidCalls);
         } else {
             if (rk > 0.0f && !g_epHaveRigid) { InterlockedIncrement64(&g_epRigidNoBase); }
             rk = 0.0f;
+        }
+        if (ok) {
+            rigL[1] -= overM;   // body-local y = world up (the body only yaws)
+            for (int r = 0; r < 3; ++r) { rigW[r] = x[4 * r] * rigL[0] + x[4 * r + 1] * rigL[1] + x[4 * r + 2] * rigL[2]; }
         }
     }
     const float keepK = 1.0f - rk;   // the animated head's share
@@ -33886,6 +33982,9 @@ void EyePointApply(__int64 a1)
         } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
         if (ok) {
             for (int i = 0; i < 3; ++i) { g_epRigidL[i] = camBase[i] + d1L[i]; }
+            // climbing round 6: the height refuses dips (run 17:45: it sat at ~131 cm against a 168.8 cm standing base, and the rigid
+            // view held the camera there, inside the body, after each climb-up) - climbhand_logic.h StandRefStep
+            g_epRigidL[1] = ClimbHandStandRef(g_epRigidL[1]);
             g_epHaveRigid = true;
         }
     }

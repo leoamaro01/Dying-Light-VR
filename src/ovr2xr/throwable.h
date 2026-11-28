@@ -50,6 +50,11 @@ bool ThrowableReleasePending();
 // L2 after this filter (the mod-menu block): L2 dropping while the game state is 2 throws (INV-566).
 bool ThrowableHoldsL2();
 
+// True while the grappling hook (ItemType 47) is the selected item and the player is on foot, as of the latest scePad poll (the same
+// item reads as the throwable decision; false while throwable_hand_enable=0 - those reads are off then). For grapple_hand's trigger
+// swap (ovr2xr.cpp's pad chain). One volatile load - any thread.
+bool ThrowableHookSelected();
+
 // Ruling R24: true while the throwable decision is not Idle - Readying / Readied / Releasing or any cancel wait (as of
 // the latest scePad poll; false while throwable_hand_enable=0 and nothing is in flight). The melee throw (throw_enable)
 // and the VR swing (melee_swing_mode=2) do not trigger while it is true. One volatile load - any thread.
